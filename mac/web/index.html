@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>图片识别 · 本地测试台</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101116;
+      --panel: #181a22;
+      --panel-soft: #20232d;
+      --line: #323642;
+      --text: #f2f4f8;
+      --muted: #a6adbd;
+      --purple: #9c8cff;
+      --purple-dark: #6d58e8;
+      --green: #6fe0af;
+      --danger: #ff8d93;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background: radial-gradient(circle at 15% -10%, #2c245d 0, transparent 33rem), var(--bg);
+    }
+    main { width: min(980px, calc(100% - 32px)); margin: 0 auto; padding: 52px 0 72px; }
+    header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 32px; }
+    .eyebrow { color: var(--purple); font-size: 13px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 7px 0 8px; font-size: clamp(28px, 5vw, 42px); letter-spacing: -.045em; }
+    .subtitle { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55; }
+    .status { display: flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--muted); font-size: 13px; padding-top: 6px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+    .grid { display: grid; grid-template-columns: 1.08fr .92fr; gap: 18px; }
+    .card { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line); border-radius: 18px; padding: 22px; box-shadow: 0 14px 45px #0002; }
+    .card h2 { margin: 0 0 16px; font-size: 16px; }
+    label { display: block; font-size: 13px; font-weight: 650; color: var(--muted); margin: 0 0 8px; }
+    input[type="password"] { width: 100%; background: #11131a; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px; outline: none; font: inherit; }
+    input[type="password"]:focus { border-color: var(--purple); box-shadow: 0 0 0 3px #9c8cff24; }
+    .hint { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .model-picker { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; margin-top: 18px; }
+    select { width: 100%; color: var(--text); background: #11131a; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font: inherit; outline: none; }
+    .model-picker button { width: auto; margin: 0; padding: 11px 15px; font-size: 13px; }
+    .drop-zone { position: relative; min-height: 252px; border: 1.5px dashed #555b6c; border-radius: 14px; display: grid; place-items: center; text-align: center; padding: 20px; cursor: pointer; transition: .18s ease; overflow: hidden; }
+    .drop-zone:hover, .drop-zone.active { border-color: var(--purple); background: #9c8cff12; }
+    .drop-zone.has-image { border-style: solid; padding: 0; }
+    .drop-zone img { width: 100%; height: 250px; object-fit: contain; background: #0c0d11; }
+    .drop-copy strong { display: block; font-size: 17px; margin-bottom: 7px; }
+    .drop-copy span { color: var(--muted); font-size: 13px; }
+    #file-input { display: none; }
+    .file-name { min-height: 22px; color: var(--muted); font-size: 12px; margin: 10px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button { width: 100%; appearance: none; border: 0; border-radius: 11px; background: linear-gradient(135deg, var(--purple), var(--purple-dark)); color: white; cursor: pointer; font: 700 15px inherit; padding: 13px; margin-top: 18px; transition: transform .15s, opacity .15s; }
+    button:hover:not(:disabled) { transform: translateY(-1px); }
+    button:disabled { cursor: wait; opacity: .55; }
+    .result { min-height: 326px; display: flex; flex-direction: column; }
+    .empty { display: grid; place-items: center; flex: 1; color: var(--muted); text-align: center; font-size: 14px; line-height: 1.6; }
+    .result-content { display: none; }
+    .result-content.visible { display: block; }
+    .category { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border-radius: 99px; color: #d7d0ff; background: #9c8cff1e; font-weight: 700; font-size: 13px; }
+    .summary { line-height: 1.55; margin: 14px 0 18px; }
+    .section-title { margin: 18px 0 9px; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .05em; }
+    .tags { display: flex; flex-wrap: wrap; gap: 7px; }
+    .tag { background: var(--panel-soft); border: 1px solid #343846; border-radius: 7px; padding: 6px 8px; font-size: 13px; }
+    .characters { display: grid; gap: 8px; }
+    .character { display: flex; justify-content: space-between; gap: 10px; background: var(--panel-soft); border-radius: 9px; padding: 9px 10px; font-size: 13px; }
+    .no-candidate { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .confidence { color: var(--green); font-variant-numeric: tabular-nums; }
+    .model { margin-top: 20px; color: #72798b; font-size: 11px; word-break: break-all; }
+    .error { display: none; margin-top: 14px; border-radius: 10px; padding: 11px 12px; background: #ff8d9317; color: var(--danger); font-size: 13px; line-height: 1.45; }
+    .error.visible { display: block; }
+    .loading { display: none; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; margin-top: 17px; }
+    .loading.visible { display: flex; }
+    .spinner { width: 16px; height: 16px; border: 2px solid #777185; border-top-color: var(--purple); border-radius: 50%; animation: spin .8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    footer { color: #747b8b; font-size: 12px; margin-top: 20px; line-height: 1.5; }
+    @media (max-width: 720px) { main { padding-top: 30px; } header { display: block; } .status { margin-top: 14px; } .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">Private LAN · Image Tagger</div>
+        <h1>图片识别测试台</h1>
+        <p class="subtitle">上传一张图片，检查分类、中文标签与角色候选。</p>
+      </div>
+      <div class="status"><span class="dot"></span><span id="status-text">服务已连接</span></div>
+    </header>
+
+    <div class="grid">
+      <section class="card">
+        <h2>发送图片</h2>
+        <label for="api-key">接口密钥</label>
+        <input id="api-key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
+        <p class="hint">只保存在此浏览器标签页，刷新或关闭后不会留存。</p>
+        <div class="model-picker">
+          <div><label for="model-preset">推理模型</label><select id="model-preset"><option value="4b">4B · 更快</option><option value="8b">8B · 更细致</option></select></div>
+          <button id="switch-model" type="button" disabled>切换</button>
+        </div>
+        <p class="hint">切换会暂停识别并重新加载模型；首次选择 8B 需要下载约 5.8GB。</p>
+
+        <input id="file-input" type="file" accept="image/*">
+        <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择图片">
+          <div id="drop-copy" class="drop-copy"><strong>拖一张图片到这里</strong><span>或点击选择 · 支持常见图片格式</span></div>
+          <img id="preview" alt="所选图片预览" hidden>
+        </div>
+        <div id="file-name" class="file-name"></div>
+        <button id="submit" type="button" disabled>识别图片</button>
+        <div id="loading" class="loading"><span class="spinner"></span>正在识别，较大图片可能需要一点时间…</div>
+        <div id="error" class="error" role="alert"></div>
+      </section>
+
+      <section class="card result">
+        <h2>识别结果</h2>
+        <div id="empty" class="empty">结果会显示在这里。<br>角色名称仅是候选，请结合置信度判断。</div>
+        <div id="result" class="result-content">
+          <div id="category" class="category"></div>
+          <p id="summary" class="summary"></p>
+          <div class="section-title">标签</div>
+          <div id="tags" class="tags"></div>
+          <div id="characters-wrap">
+            <div class="section-title">角色候选</div>
+            <div id="characters" class="characters"></div>
+          </div>
+          <div id="model" class="model"></div>
+        </div>
+      </section>
+    </div>
+    <footer>图片会直接发送给这台 Mac 上的本地服务；此页面不加载第三方脚本或分析服务。</footer>
+  </main>
+
+  <script>
+    const labels = {
+      anime_illustration: '二次元插画', chat_screenshot: '聊天截图', meme_or_sticker: '表情包 / 梗图',
+      casual_photo: '随手拍照', portrait_photo: '三次元人像', professional_photography: '摄影作品',
+      wallpaper_or_desktop: '壁纸 / 桌面图片', document_or_ui: '文档 / 界面', other: '其他图片'
+    };
+    const fileInput = document.querySelector('#file-input');
+    const dropZone = document.querySelector('#drop-zone');
+    const preview = document.querySelector('#preview');
+    const dropCopy = document.querySelector('#drop-copy');
+    const fileName = document.querySelector('#file-name');
+    const apiKey = document.querySelector('#api-key');
+    const modelPreset = document.querySelector('#model-preset');
+    const switchModel = document.querySelector('#switch-model');
+    const submit = document.querySelector('#submit');
+    const errorBox = document.querySelector('#error');
+    const loading = document.querySelector('#loading');
+    const openedAsFile = window.location.protocol === 'file:';
+    let selectedFile = null;
+    let previewUrl = null;
+
+    apiKey.value = sessionStorage.getItem('tagger-api-key') || '';
+    apiKey.addEventListener('input', () => {
+      sessionStorage.setItem('tagger-api-key', apiKey.value);
+      updateButton();
+      updateSwitchButton();
+    });
+    function updateButton() { submit.disabled = openedAsFile || !(selectedFile && apiKey.value.trim()); }
+    function updateSwitchButton() { switchModel.disabled = openedAsFile || !apiKey.value.trim(); }
+    function showError(message) { errorBox.textContent = message; errorBox.classList.add('visible'); }
+    function clearError() { errorBox.classList.remove('visible'); errorBox.textContent = ''; }
+    function selectFile(file) {
+      if (!file || !file.type.startsWith('image/')) { showError('请选择一张可识别的图片文件。'); return; }
+      selectedFile = file;
+      clearError();
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = URL.createObjectURL(file);
+      preview.src = previewUrl;
+      preview.hidden = false;
+      dropCopy.hidden = true;
+      dropZone.classList.add('has-image');
+      fileName.textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)} MB`;
+      updateButton();
+    }
+    dropZone.addEventListener('click', () => fileInput.click());
+    dropZone.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') fileInput.click(); });
+    fileInput.addEventListener('change', () => selectFile(fileInput.files[0]));
+    ['dragenter', 'dragover'].forEach(eventName => dropZone.addEventListener(eventName, event => { event.preventDefault(); dropZone.classList.add('active'); }));
+    ['dragleave', 'drop'].forEach(eventName => dropZone.addEventListener(eventName, event => { event.preventDefault(); dropZone.classList.remove('active'); }));
+    dropZone.addEventListener('drop', event => selectFile(event.dataTransfer.files[0]));
+    function el(tag, className, text) { const node = document.createElement(tag); if (className) node.className = className; node.textContent = text; return node; }
+    function render(data) {
+      document.querySelector('#empty').style.display = 'none';
+      document.querySelector('#result').classList.add('visible');
+      document.querySelector('#category').textContent = labels[data.category] || data.category || '未分类';
+      document.querySelector('#summary').textContent = data.summary || '没有返回摘要。';
+      const tags = document.querySelector('#tags'); tags.replaceChildren();
+      (data.tags || []).forEach(tag => tags.append(el('span', 'tag', tag)));
+      const chars = document.querySelector('#characters'); chars.replaceChildren();
+      const candidates = data.character_candidates || [];
+      if (!candidates.length) {
+        chars.append(el('div', 'no-candidate', '未识别出有依据的角色候选；这不影响通用图片标签。'));
+      } else {
+        candidates.forEach(item => { const row = el('div', 'character'); row.append(el('span', '', item.name), el('span', 'confidence', `${Math.round(Number(item.confidence || 0) * 100)}%`)); chars.append(row); });
+      }
+      document.querySelector('#model').textContent = `模型：${data.model || '本地模型'}`;
+    }
+    function presetFromModel(model) { return model.includes('8B') ? '8b' : '4b'; }
+    async function refreshModel() {
+      if (!apiKey.value.trim()) return;
+      const response = await fetch('/v1/models', { headers: { 'X-API-Key': apiKey.value.trim() } });
+      if (!response.ok) throw new Error('无法读取当前模型，请检查密钥。');
+      const data = await response.json();
+      modelPreset.value = presetFromModel(data.current_model);
+    }
+    submit.addEventListener('click', async () => {
+      if (!selectedFile || !apiKey.value.trim()) return;
+      clearError(); submit.disabled = true; loading.classList.add('visible');
+      try {
+        const form = new FormData(); form.append('image', selectedFile, selectedFile.name);
+        const response = await fetch('/v1/tag', { method: 'POST', headers: { 'X-API-Key': apiKey.value.trim() }, body: form });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `服务返回 ${response.status}`);
+        render(data);
+      } catch (error) { showError(`识别失败：${error.message}`); }
+      finally { loading.classList.remove('visible'); updateButton(); }
+    });
+    switchModel.addEventListener('click', async () => {
+      clearError(); submit.disabled = true; switchModel.disabled = true; loading.classList.add('visible');
+      loading.lastChild.textContent = modelPreset.value === '8b' ? '正在切换至 8B；首次使用会下载并加载模型，请耐心等待…' : '正在切换至 4B 并释放内存…';
+      try {
+        const response = await fetch('/v1/model', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey.value.trim() }, body: JSON.stringify({ preset: modelPreset.value }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || `服务返回 ${response.status}`);
+        document.querySelector('#model').textContent = `当前模型：${data.model}`;
+      } catch (error) { showError(`模型切换失败：${error.message}`); }
+      finally {
+        loading.classList.remove('visible'); loading.lastChild.textContent = '正在识别，较大图片可能需要一点时间…'; updateButton(); updateSwitchButton();
+      }
+    });
+    apiKey.addEventListener('change', () => refreshModel().catch(error => showError(error.message)));
+    if (openedAsFile) {
+      document.querySelector('.dot').style.background = 'var(--danger)';
+      document.querySelector('#status-text').textContent = '请通过服务地址打开页面';
+      showError('不要直接打开 web/index.html。请在浏览器打开 http://Mac的局域网IP:8787/');
+    } else {
+      fetch('/healthz').then(response => { if (!response.ok) throw new Error(); }).catch(() => {
+        document.querySelector('.dot').style.background = 'var(--danger)';
+        document.querySelector('#status-text').textContent = '服务未就绪';
+        showError('无法连接本地服务。请确认 Mac 上的启动窗口仍在运行，并使用 Mac 的局域网 IP 访问本页。');
+      });
+    }
+    updateSwitchButton();
+    refreshModel().catch(error => showError(error.message));
+  </script>
+</body>
+</html>

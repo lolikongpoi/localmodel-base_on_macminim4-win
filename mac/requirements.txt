@@ -1,0 +1,6 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.12,<1
+Pillow>=10,<12
+pillow-heif>=1.1,<2
+mlx-vlm>=0.3
