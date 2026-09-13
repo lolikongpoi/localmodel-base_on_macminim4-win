@@ -37,8 +37,10 @@
     .card { background: color-mix(in srgb, var(--panel) 92%, transparent); border: 1px solid var(--line); border-radius: 18px; padding: 22px; box-shadow: 0 14px 45px #0002; }
     .card h2 { margin: 0 0 16px; font-size: 16px; }
     label { display: block; font-size: 13px; font-weight: 650; color: var(--muted); margin: 0 0 8px; }
-    input[type="password"] { width: 100%; background: #11131a; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px; outline: none; font: inherit; }
-    input[type="password"]:focus { border-color: var(--purple); box-shadow: 0 0 0 3px #9c8cff24; }
+    .key-field { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .key-field input { width: 100%; min-width: 0; background: #11131a; color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 12px; outline: none; font: inherit; }
+    .key-field input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px #9c8cff24; }
+    .key-visibility { width: auto; margin: 0; padding: 0 13px; font-size: 13px; background: #252839; white-space: nowrap; }
     .hint { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
     .model-picker { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; margin-top: 18px; }
     select { width: 100%; color: var(--text); background: #11131a; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font: inherit; outline: none; }
@@ -93,7 +95,10 @@
       <section class="card">
         <h2>发送图片</h2>
         <label for="api-key">接口密钥</label>
-        <input id="api-key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
+        <div class="key-field">
+          <input id="api-key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
+          <button id="toggle-api-key" class="key-visibility" type="button" aria-controls="api-key" aria-pressed="false">显示</button>
+        </div>
         <p class="hint">只保存在此浏览器标签页，刷新或关闭后不会留存。</p>
         <div class="model-picker">
           <div><label for="model-preset">推理模型</label><select id="model-preset"><option value="4b">4B · 更快</option><option value="8b">8B · 更细致</option></select></div>
@@ -143,6 +148,7 @@
     const dropCopy = document.querySelector('#drop-copy');
     const fileName = document.querySelector('#file-name');
     const apiKey = document.querySelector('#api-key');
+    const toggleApiKey = document.querySelector('#toggle-api-key');
     const modelPreset = document.querySelector('#model-preset');
     const switchModel = document.querySelector('#switch-model');
     const submit = document.querySelector('#submit');
@@ -157,6 +163,13 @@
       sessionStorage.setItem('tagger-api-key', apiKey.value);
       updateButton();
       updateSwitchButton();
+    });
+    toggleApiKey.addEventListener('click', () => {
+      const isHidden = apiKey.type === 'password';
+      apiKey.type = isHidden ? 'text' : 'password';
+      toggleApiKey.textContent = isHidden ? '隐藏' : '显示';
+      toggleApiKey.setAttribute('aria-pressed', String(isHidden));
+      apiKey.focus();
     });
     function updateButton() { submit.disabled = openedAsFile || !(selectedFile && apiKey.value.trim()); }
     function updateSwitchButton() { switchModel.disabled = openedAsFile || !apiKey.value.trim(); }
