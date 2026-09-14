@@ -67,6 +67,14 @@ class MovePlan:
     note: str
 
 
+@dataclass(frozen=True)
+class ReportCleanupPlan:
+    """一份可安全删除的完整 Tag 报告运行目录。"""
+
+    report_dir: Path
+    record_count: int
+
+
 class TransferError(RuntimeError):
     def __init__(self, message: str, staging_dir: Path | None = None):
         super().__init__(message)
@@ -228,13 +236,17 @@ def prepare_cached_database(library_root: Path) -> Path:
 def read_database_rows(db_path: Path) -> dict[str, tuple[str, str]]:
     if not db_path.is_file():
         return {}
+    connection: sqlite3.Connection | None = None
     try:
-        with sqlite3.connect(db_path) as connection:
-            rows = connection.execute(
-                "SELECT source_path, destination_path, move_status FROM images"
-            ).fetchall()
+        connection = sqlite3.connect(db_path)
+        rows = connection.execute(
+            "SELECT source_path, destination_path, move_status FROM images"
+        ).fetchall()
     except sqlite3.Error:
         return {}
+    finally:
+        if connection is not None:
+            connection.close()
     return {source: (destination, status) for source, destination, status in rows}
 
 
@@ -242,6 +254,75 @@ def database_for_reading(library_root: Path) -> Path:
     """优先使用 F 盘缓存；首次迁移前可只读现有 G 盘数据库。"""
     cached = cached_database_path(library_root)
     return cached if cached.is_file() else database_path(library_root)
+
+
+def find_fully_archived_reports(
+    report_root: Path, library_root: Path,
+) -> tuple[list[ReportCleanupPlan], int, int]:
+    """找出可删除的已结束报告，保守地保留任何未完成或未完全归档的目录。"""
+    moved_sources = {
+        source
+        for source, (_destination, status) in read_database_rows(database_for_reading(library_root)).items()
+        if status == "moved"
+    }
+    candidates: list[ReportCleanupPlan] = []
+    incomplete_or_invalid = 0
+    not_fully_archived = 0
+
+    if not report_root.is_dir():
+        return candidates, incomplete_or_invalid, not_fully_archived
+
+    for report_dir in sorted(report_root.iterdir(), key=lambda path: path.name):
+        report_csv = report_dir / "image_tags.csv"
+        # run_summary.json 只有一次识别任务结束后才写入，避免清理正在追加的报告。
+        if not report_dir.is_dir() or report_dir.is_symlink() or not (report_dir / "run_summary.json").is_file():
+            incomplete_or_invalid += 1
+            continue
+        if not report_csv.is_file():
+            incomplete_or_invalid += 1
+            continue
+        try:
+            with report_csv.open("r", encoding="utf-8-sig", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, UnicodeError, csv.Error):
+            incomplete_or_invalid += 1
+            continue
+
+        source_keys: set[str] = set()
+        valid = bool(rows)
+        for row in rows:
+            source_text = (row.get("source") or "").strip()
+            if (row.get("status") or "").strip().lower() != "success" or not source_text:
+                valid = False
+                break
+            source_keys.add(normalize_path(source_text))
+        if not valid or not source_keys:
+            incomplete_or_invalid += 1
+        elif source_keys.issubset(moved_sources):
+            candidates.append(ReportCleanupPlan(report_dir=report_dir, record_count=len(rows)))
+        else:
+            not_fully_archived += 1
+    return candidates, incomplete_or_invalid, not_fully_archived
+
+
+def delete_archived_reports(
+    report_root: Path, plans: list[ReportCleanupPlan], emit: callable,
+) -> tuple[list[ReportCleanupPlan], list[tuple[ReportCleanupPlan, str]]]:
+    """删除已核验的报告目录，并再次限制目标必须是报告根目录的直接子目录。"""
+    root = report_root.resolve()
+    deleted: list[ReportCleanupPlan] = []
+    failed: list[tuple[ReportCleanupPlan, str]] = []
+    total = len(plans)
+    for index, plan in enumerate(plans, start=1):
+        try:
+            if plan.report_dir.resolve().parent != root:
+                raise ValueError("报告目录不在所选报告根目录下")
+            emit("cleanup_delete", (index, total, plan))
+            shutil.rmtree(plan.report_dir)
+            deleted.append(plan)
+        except (OSError, ValueError) as exc:
+            failed.append((plan, str(exc)))
+    return deleted, failed
 
 
 def make_plans(entries: list[TagEntry], library_root: Path) -> list[MovePlan]:
@@ -580,6 +661,8 @@ class TagMoveApp(tk.Tk):
         self.move_button.pack(side="left", padx=(8, 0))
         self.sync_button = ttk.Button(actions, text="更新数据库与 CSV", command=self._start_sync)
         self.sync_button.pack(side="left", padx=(8, 0))
+        self.cleanup_button = ttk.Button(actions, text="清理已归档报告", command=self._start_cleanup)
+        self.cleanup_button.pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="打开目标文件夹", command=self._open_library).pack(side="left", padx=(16, 0))
         ttk.Label(actions, textvariable=self.summary_var).pack(side="right")
 
@@ -642,6 +725,7 @@ class TagMoveApp(tk.Tk):
         self.scan_button.configure(state="disabled" if busy else "normal")
         self.move_button.configure(state="disabled" if busy or not any(plan.state in {"ready", "recovery"} for plan in self.plans) else "normal")
         self.sync_button.configure(state="disabled" if busy else "normal")
+        self.cleanup_button.configure(state="disabled" if busy else "normal")
 
     def _start_scan(self) -> None:
         if self.busy:
@@ -726,6 +810,49 @@ class TagMoveApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _start_cleanup(self) -> None:
+        if self.busy:
+            return
+        report_root = Path(self.report_var.get().strip())
+        library_root = Path(self.library_var.get().strip())
+        if not report_root.is_dir():
+            messagebox.showerror("无法清理", "请选择有效的 Tag 报告目录。")
+            return
+        if not str(library_root):
+            messagebox.showerror("无法清理", "请填写目标图片库目录，用于核验已移动状态。")
+            return
+        self._set_busy(True)
+        self.status_var.set("正在核验哪些已结束报告的图片均已归档……")
+        self.phase_var.set("报告清理：正在核验归档状态")
+
+        def worker() -> None:
+            try:
+                result = find_fully_archived_reports(report_root, library_root)
+                self.events.put(("cleanup_ready", (report_root, result)))
+            except Exception as exc:
+                self.events.put(("error", f"核验已归档报告失败：{exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _delete_cleanup_plans(self, report_root: Path, plans: list[ReportCleanupPlan]) -> None:
+        self._set_busy(True)
+        self.progress.configure(maximum=max(len(plans), 1), value=0)
+        self.status_var.set("正在删除已核验的报告目录；不会删除图片或标签数据库。")
+        self.phase_var.set(f"报告清理：0/{len(plans)}")
+
+        def worker() -> None:
+            try:
+                result = delete_archived_reports(
+                    report_root,
+                    plans,
+                    lambda kind, payload: self.events.put((kind, payload)),
+                )
+                self.events.put(("cleanup_finished", result))
+            except Exception as exc:
+                self.events.put(("error", f"清理报告未完成：{exc}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _fill_table(self) -> None:
         for item in self.table.get_children():
             self.table.delete(item)
@@ -805,6 +932,51 @@ class TagMoveApp(tk.Tk):
                         "数据库与 CSV 已更新",
                         f"F 盘缓存数据库：\n{result['cached_db']}\n\nG 盘 CSV：\n{result['target_csv']}",
                     )
+                elif kind == "cleanup_ready":
+                    self._set_busy(False)
+                    report_root, (plans, incomplete_or_invalid, not_fully_archived) = payload
+                    if not plans:
+                        self.status_var.set("没有可清理的已归档报告。")
+                        self.phase_var.set("报告清理：没有符合条件的报告")
+                        self.result_var.set(
+                            f"结果：保留未完成/异常报告 {incomplete_or_invalid} 份，"
+                            f"保留尚未完全归档报告 {not_fully_archived} 份。"
+                        )
+                        messagebox.showinfo("没有可清理的报告", self.result_var.get())
+                    else:
+                        records = sum(plan.record_count for plan in plans)
+                        warning = (
+                            f"已找到 {len(plans)} 份可清理报告，共 {records} 条记录。\n\n"
+                            "这些报告均已结束，且每张成功图片都已登记为“已移动”。\n"
+                            "将删除对应的报告目录（CSV、JSONL 与摘要），不会删除图片或标签数据库。\n\n"
+                            f"另有未完成/异常报告 {incomplete_or_invalid} 份、"
+                            f"尚未完全归档报告 {not_fully_archived} 份，会全部保留。\n\n"
+                            "报告目录删除后无法由本程序恢复。是否继续？"
+                        )
+                        if self.busy:
+                            return
+                        if messagebox.askyesno("确认清理已归档报告", warning, icon="warning"):
+                            self._delete_cleanup_plans(report_root, plans)
+                        else:
+                            self.status_var.set("已取消清理报告。")
+                            self.phase_var.set("报告清理：已取消")
+                elif kind == "cleanup_delete":
+                    index, total, plan = payload
+                    self.progress.configure(maximum=total, value=index)
+                    self.status_var.set(f"正在删除报告 {index}/{total}：{plan.report_dir.name}")
+                    self.phase_var.set(f"报告清理：{index}/{total}（{index / total * 100:.1f}%）")
+                elif kind == "cleanup_finished":
+                    self._set_busy(False)
+                    deleted, failed = payload
+                    self.status_var.set(f"报告清理结束：已删除 {len(deleted)} 份，失败 {len(failed)} 份。")
+                    self.phase_var.set("报告清理：完成")
+                    self.result_var.set(f"结果：已删除 {len(deleted)} 份已归档报告；保留图片与标签数据库。")
+                    if failed:
+                        details = "\n".join(f"{plan.report_dir.name}：{error}" for plan, error in failed[:10])
+                        messagebox.showwarning("部分报告未删除", f"已删除 {len(deleted)} 份报告。\n\n{details}")
+                    else:
+                        messagebox.showinfo("已清理归档报告", f"已删除 {len(deleted)} 份已归档报告。\n图片与标签数据库未受影响。")
+                    self._start_scan()
                 elif kind == "error":
                     self._set_busy(False)
                     self.status_var.set(str(payload))
