@@ -691,7 +691,13 @@ class TagMoveApp(tk.Tk):
 
         def worker() -> None:
             try:
-                result = execute_safe_move(workable, library_root, self.events.put)
+                # execute_safe_move 的回调签名是 (事件名, 数据)；Queue.put 只接受一个事件对象。
+                # 显式封装为元组，确保 GUI 能持续接收进度和最终完成事件。
+                result = execute_safe_move(
+                    workable,
+                    library_root,
+                    lambda kind, payload: self.events.put((kind, payload)),
+                )
                 self.events.put(("move_finished", result))
             except TransferError as exc:
                 suffix = f"\n临时副本位置：{exc.staging_dir}" if exc.staging_dir else ""
