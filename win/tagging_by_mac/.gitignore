@@ -1,0 +1,4 @@
+.venv/
+__pycache__/
+mac_tag_reports/
+mac_tag_task_config.json

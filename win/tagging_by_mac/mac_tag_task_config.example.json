@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "folder": "D:/Pictures/to-tag",
+  "output_folder": "./mac_tag_reports",
+  "service_url": "http://192.168.1.23:8787",
+  "preset": "4b",
+  "recursive": true,
+  "max_images": "",
+  "max_minutes": ""
+}

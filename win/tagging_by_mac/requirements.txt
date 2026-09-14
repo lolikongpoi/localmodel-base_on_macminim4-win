@@ -1,0 +1,2 @@
+# This client uses only Python's standard library.
+# Keep this file so the setup flow remains compatible with pip.
