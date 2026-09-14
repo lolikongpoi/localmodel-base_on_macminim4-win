@@ -5,6 +5,7 @@
 ## 目录
 
 - [`mac/`](mac/)：Mac 端本地推理服务、内置测试网页与安装/启动脚本。
+- [`win/moving/`](win/moving/)：Windows 图片 Tag 安全归档工具；按 Tag 分类、可读重命名、先复制校验再删除原图，并生成 SQLite 与 CSV 标签库。
 - [`WINDOWS_CLIENT_INTEGRATION.md`](WINDOWS_CLIENT_INTEGRATION.md)：Windows 客户端接入 API 的完整说明。
 
 ## Mac 端快速开始
@@ -25,3 +26,7 @@ http://MAC_LAN_IP:8787/
 ```
 
 详细的模型、性能、HEIC 支持与安全说明见 [`mac/README.md`](mac/README.md)。
+
+## Windows 图片归档
+
+若已通过 Windows 客户端生成图片 Tag 报告，可使用 [`win/moving/`](win/moving/) 将图片安全归档到本地图片库。工具会先完整复制和 SHA-256 校验，随后才删除原图；标签数据库先写入 F 盘缓存，最后以完整快照同步到目标图片库和可读 CSV。详见 [`win/moving/README.md`](win/moving/README.md)。
