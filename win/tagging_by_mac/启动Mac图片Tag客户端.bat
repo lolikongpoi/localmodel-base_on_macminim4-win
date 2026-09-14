@@ -1,9 +1,15 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
-if not exist ".venv\Scripts\pythonw.exe" (
-  echo 尚未安装独立环境，请先双击“安装环境.bat”。
+set "PYTHON=%~dp0.venv\Scripts\python.exe"
+if not exist "%PYTHON%" (
+  echo Python runtime not found. Run the setup batch file first.
   pause
   exit /b 1
 )
-start "" ".venv\Scripts\pythonw.exe" mac_tag_app.py
+"%PYTHON%" "%~dp0mac_tag_app.py"
+if errorlevel 1 (
+  echo.
+  echo Application failed. Keep this window open and copy the error above.
+  pause
+)
