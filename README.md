@@ -72,6 +72,14 @@ Windows 客户端与 Mac 服务的连接、API key、超时和错误处理详见
 
 报告、数据库字段和归档恢复说明见 [`win/moving/README.md`](win/moving/README.md)。
 
+## 署名与灵感
+
+项目署名：**LLK INDUSTRY committee**。
+
+`LLK INDUSTRY` 是 **Low Latitude Kangaroo Interactive Negotiating Duty Urban Study Translating Renaissance Yearbook Committee** 的首字母缩写，即“低纬度袋鼠互动性谈判城市税收研究翻译复兴年鉴委员会”。
+
+本项目的图片预处理工作流灵感来源于 [get_sd_netmate_sepictuers](https://github.com/lolikongpoi/get_sd_netmate_sepictuers)。
+
 ## AI 开发与使用说明
 
 本项目的全部程序代码由 **GPT-5.6 Terra** 生成，没有人工编写的业务代码。AI 生成不等于已经过独立安全审计或适合所有环境；使用者应自行判断并承担在自己设备上运行的风险。
