@@ -4,3 +4,4 @@ __pycache__/
 .env
 *.py[cod]
 win/moving/cache/
+win/AIO/aio_config.json
