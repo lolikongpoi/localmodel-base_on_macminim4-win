@@ -75,6 +75,14 @@ class ReportCleanupPlan:
     record_count: int
 
 
+@dataclass(frozen=True)
+class CopyFailure:
+    """复制或校验失败但仍可由用户选择跳过的单张图片。"""
+
+    plan: MovePlan
+    error: str
+
+
 class TransferError(RuntimeError):
     def __init__(self, message: str, staging_dir: Path | None = None):
         super().__init__(message)
@@ -530,32 +538,57 @@ def synchronize_cached_database(library_root: Path) -> dict[str, Path]:
 
 def execute_safe_move(
     plans: list[MovePlan], library_root: Path, emit: callable,
+    decide_copy_failures: callable | None = None,
 ) -> dict[str, object]:
-    """先完整复制+SHA 校验所有文件，随后登记数据库，最后才删除原图。"""
+    """复制阶段可人工跳过失败项；只有完整校验的图片才会进入后续移动流程。"""
     workable = [plan for plan in plans if plan.state in {"ready", "recovery"}]
     if not workable:
-        return {"moved": 0, "delete_failed": [], "staging": None, "csv_path": None, "csv_error": ""}
+        return {
+            "moved": 0, "delete_failed": [], "copy_failures": [], "staging": None,
+            "csv_path": None, "csv_error": "",
+        }
 
     library_root.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     staging_root = library_root / STAGING_DIR_NAME / run_id
     staged: dict[MovePlan, Path] = {}
+    verified: list[MovePlan] = []
+    copy_failures: list[CopyFailure] = []
     try:
         for index, plan in enumerate(workable, start=1):
             assert plan.destination is not None
             emit("copy", (index, len(workable), plan))
             stage_path = staging_root / plan.destination.relative_to(library_root)
-            if plan.state == "recovery":
-                verify_copy(plan.entry.source, plan.destination)
-                continue
-            stage_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(plan.entry.source, stage_path)
-            verify_copy(plan.entry.source, stage_path)
-            staged[plan] = stage_path
+            try:
+                if plan.state == "recovery":
+                    verify_copy(plan.entry.source, plan.destination)
+                else:
+                    stage_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(plan.entry.source, stage_path)
+                    verify_copy(plan.entry.source, stage_path)
+                    staged[plan] = stage_path
+                verified.append(plan)
+            except (OSError, TransferError) as exc:
+                # 半份副本不能被提升到图片库；保留原图并让用户决定是否跳过它。
+                if stage_path.is_file():
+                    try:
+                        stage_path.unlink()
+                    except OSError:
+                        pass
+                copy_failures.append(CopyFailure(plan, str(exc)))
 
-        for index, plan in enumerate(workable, start=1):
+        if copy_failures:
+            emit("copy_failures", (copy_failures, len(verified), len(workable)))
+            should_continue = decide_copy_failures(copy_failures) if decide_copy_failures else False
+            if not should_continue:
+                raise TransferError("已取消移动：复制或校验失败的图片未被跳过", staging_root)
+        if not verified:
+            raise TransferError("没有可继续移动的已校验图片", staging_root)
+        emit("copy_ready", (len(verified), len(copy_failures)))
+
+        for index, plan in enumerate(verified, start=1):
             assert plan.destination is not None
-            emit("promote", (index, len(workable), plan))
+            emit("promote", (index, len(verified), plan))
             if plan.state == "recovery":
                 continue
             stage_path = staged[plan]
@@ -567,7 +600,7 @@ def execute_safe_move(
         cached_db = prepare_cached_database(library_root)
         connection = open_database(cached_db)
         try:
-            record_verified_copies(connection, workable)
+            record_verified_copies(connection, verified)
         finally:
             connection.close()
 
@@ -578,8 +611,8 @@ def execute_safe_move(
         try:
             delete_failed: list[tuple[MovePlan, str]] = []
             moved = 0
-            for index, plan in enumerate(workable, start=1):
-                emit("delete", (index, len(workable), plan))
+            for index, plan in enumerate(verified, start=1):
+                emit("delete", (index, len(verified), plan))
                 try:
                     plan.entry.source.unlink()
                 except OSError as exc:
@@ -616,6 +649,7 @@ def execute_safe_move(
     return {
         "moved": moved,
         "delete_failed": delete_failed,
+        "copy_failures": copy_failures,
         "staging": staging_root,
         "csv_path": csv_path,
         "csv_error": csv_error,
@@ -629,6 +663,7 @@ class TagMoveApp(tk.Tk):
         self.geometry("1300x780")
         self.minsize(980, 620)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.copy_failure_decisions: queue.Queue[bool] | None = None
         self.plans: list[MovePlan] = []
         self.busy = False
         self._build_ui()
@@ -772,6 +807,7 @@ class TagMoveApp(tk.Tk):
         self.phase_var.set(f"移动进度：0/{len(workable) * 3}（0.0%）· 等待复制")
         self.result_var.set("结果：正在执行安全移动，原图暂不会删除。")
         library_root = Path(self.library_var.get().strip())
+        self.copy_failure_decisions = queue.Queue(maxsize=1)
 
         def worker() -> None:
             try:
@@ -781,6 +817,7 @@ class TagMoveApp(tk.Tk):
                     workable,
                     library_root,
                     lambda kind, payload: self.events.put((kind, payload)),
+                    lambda _failures: self.copy_failure_decisions.get(),
                 )
                 self.events.put(("move_finished", result))
             except TransferError as exc:
@@ -896,11 +933,44 @@ class TagMoveApp(tk.Tk):
                     self.phase_var.set(
                         f"移动进度：{overall}/{full_total}（{overall / full_total * 100:.1f}%）· {phase} {index}/{total}"
                     )
+                elif kind == "copy_failures":
+                    failures, verified_count, total_count = payload
+                    details = "\n".join(
+                        f"{failure.plan.entry.source.name}：{failure.error}" for failure in failures[:10]
+                    )
+                    more = f"\n……另有 {len(failures) - 10} 张失败图片。" if len(failures) > 10 else ""
+                    warning = (
+                        f"已完成复制校验：{verified_count}/{total_count} 张成功，{len(failures)} 张失败。\n\n"
+                        "选择“是”会跳过失败图片，仅移动已成功校验的图片；失败图片的原文件会保留，"
+                        "下次扫描后可重新尝试。\n\n"
+                        "选择“否”会中止本次移动，不删除任何原图。\n\n"
+                        f"失败明细：\n{details}{more}"
+                    )
+                    self.status_var.set(f"复制/校验失败 {len(failures)} 张，等待确认是否跳过。")
+                    self.phase_var.set("移动进度：等待确认失败图片的处理方式")
+                    continue_with_verified = messagebox.askyesno(
+                        "复制或校验失败", warning, icon="warning",
+                    )
+                    if self.copy_failure_decisions is not None:
+                        self.copy_failure_decisions.put(continue_with_verified)
+                elif kind == "copy_ready":
+                    verified_count, failed_count = payload
+                    total = verified_count * 3
+                    self.progress.configure(maximum=max(total, 1), value=verified_count)
+                    suffix = f"；已跳过 {failed_count} 张失败图片" if failed_count else ""
+                    self.status_var.set(f"复制与校验完成：可继续处理 {verified_count} 张{suffix}。")
+                    self.phase_var.set(
+                        f"移动进度：{verified_count}/{total}（33.3%）· 等待整理到分类目录"
+                    )
                 elif kind == "move_finished":
                     self._set_busy(False)
                     result = payload
                     failed = result["delete_failed"]
-                    self.status_var.set(f"处理结束：已移动 {result['moved']} 张；删除失败 {len(failed)} 张。")
+                    skipped = result["copy_failures"]
+                    self.status_var.set(
+                        f"处理结束：已移动 {result['moved']} 张；跳过复制/校验失败 {len(skipped)} 张；"
+                        f"删除失败 {len(failed)} 张。"
+                    )
                     self.phase_var.set(f"移动进度：全部阶段完成（{result['moved']} 张已移动）")
                     if result["csv_error"]:
                         self.result_var.set(
@@ -908,7 +978,8 @@ class TagMoveApp(tk.Tk):
                         )
                     else:
                         self.result_var.set(
-                            f"结果：已完成 {result['moved']} 张；CSV 标签清单：{result['csv_path']}"
+                            f"结果：已完成 {result['moved']} 张，跳过失败 {len(skipped)} 张；"
+                            f"CSV 标签清单：{result['csv_path']}"
                         )
                     if failed:
                         details = "\n".join(f"{plan.entry.source.name}：{error}" for plan, error in failed[:10])
