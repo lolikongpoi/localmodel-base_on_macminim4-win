@@ -65,6 +65,7 @@ class MovePlan:
     destination: Path | None
     state: str
     note: str
+    staged_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -356,6 +357,56 @@ def make_plans(entries: list[TagEntry], library_root: Path) -> list[MovePlan]:
         else:
             plans.append(MovePlan(entry, destination, "ready", "准备复制、校验并移动"))
     return plans
+
+
+def is_within_directory(path: Path, root: Path) -> bool:
+    """避免临时目录中的异常路径导致恢复操作作用于图片库之外。"""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def load_staging_recovery_plans(
+    report_root: Path, library_root: Path,
+) -> tuple[list[MovePlan], int]:
+    """从 .tag_move_staging 找到中断副本，并用 Tag 报告恢复其原图和目标路径映射。"""
+    staging_root = library_root / STAGING_DIR_NAME
+    if not staging_root.is_dir():
+        return [], 0
+    staged_by_destination: dict[str, Path] = {}
+    duplicate_destinations: set[str] = set()
+    for staged_path in staging_root.rglob("*"):
+        if not staged_path.is_file() or not is_within_directory(staged_path, staging_root):
+            continue
+        try:
+            relative = staged_path.relative_to(staging_root)
+            destination = library_root / relative.relative_to(relative.parts[0])
+        except (ValueError, IndexError):
+            continue
+        key = normalize_path(destination)
+        if key in staged_by_destination:
+            duplicate_destinations.add(key)
+        else:
+            staged_by_destination[key] = staged_path
+
+    plans: list[MovePlan] = []
+    for entry in load_latest_successful_tags(report_root):
+        destination = library_root / category_folder(entry.category) / readable_filename(entry)
+        key = normalize_path(destination)
+        staged_path = staged_by_destination.pop(key, None)
+        if staged_path is None:
+            continue
+        if key in duplicate_destinations:
+            plans.append(MovePlan(entry, destination, "staging_conflict", "发现多个暂存副本，未自动恢复", staged_path))
+        elif destination.exists():
+            plans.append(MovePlan(entry, destination, "staging_conflict", "最终目标已存在，未覆盖", staged_path))
+        elif not entry.source.is_file():
+            plans.append(MovePlan(entry, destination, "staging_source_missing", "找不到原图，无法重新校验暂存副本", staged_path))
+        else:
+            plans.append(MovePlan(entry, destination, "staging_ready", "已找到暂存副本；恢复时会重新校验后继续移动", staged_path))
+    return sorted(plans, key=lambda plan: plan.entry.source_key), len(staged_by_destination) + len(duplicate_destinations)
 
 
 def file_sha256(path: Path) -> str:
@@ -656,6 +707,83 @@ def execute_safe_move(
     }
 
 
+def execute_staging_recovery(
+    plans: list[MovePlan], library_root: Path, emit: callable,
+    decide_failures: callable | None = None,
+) -> dict[str, object]:
+    """继续处理 .tag_move_staging 中已复制但尚未完成的文件。"""
+    workable = [plan for plan in plans if plan.state == "staging_ready" and plan.staged_path]
+    if not workable:
+        return {"moved": 0, "delete_failed": [], "copy_failures": [], "csv_path": None, "csv_error": ""}
+    staging_root = library_root / STAGING_DIR_NAME
+    verified: list[MovePlan] = []
+    failures: list[CopyFailure] = []
+    for index, plan in enumerate(workable, start=1):
+        assert plan.staged_path is not None
+        emit("recover_verify", (index, len(workable), plan))
+        try:
+            if not is_within_directory(plan.staged_path, staging_root):
+                raise TransferError("暂存副本不在 .tag_move_staging 目录内")
+            if not plan.entry.source.is_file():
+                raise TransferError("原图已不存在，无法重新校验暂存副本")
+            verify_copy(plan.entry.source, plan.staged_path)
+            verified.append(plan)
+        except (OSError, TransferError) as exc:
+            failures.append(CopyFailure(plan, str(exc)))
+    if failures:
+        emit("recovery_failures", (failures, len(verified), len(workable)))
+        if not (decide_failures(failures) if decide_failures else False):
+            raise TransferError("已取消恢复：暂存副本校验失败的图片未被跳过", staging_root)
+    if not verified:
+        raise TransferError("没有可安全恢复的已校验暂存副本", staging_root)
+    emit("recovery_ready", (len(verified), len(failures)))
+    try:
+        for index, plan in enumerate(verified, start=1):
+            assert plan.destination is not None and plan.staged_path is not None
+            emit("recover_promote", (index, len(verified), plan))
+            if plan.destination.exists():
+                raise TransferError(f"恢复期间最终目标已存在，未覆盖：{plan.destination}", staging_root)
+            plan.destination.parent.mkdir(parents=True, exist_ok=True)
+            plan.staged_path.replace(plan.destination)
+        cached_db = prepare_cached_database(library_root)
+        connection = open_database(cached_db)
+        try:
+            record_verified_copies(connection, verified)
+        finally:
+            connection.close()
+        copy_snapshot(cached_db, database_path(library_root))
+        connection = open_database(cached_db)
+        try:
+            delete_failed: list[tuple[MovePlan, str]] = []
+            moved = 0
+            for index, plan in enumerate(verified, start=1):
+                emit("recover_delete", (index, len(verified), plan))
+                try:
+                    plan.entry.source.unlink()
+                except OSError as exc:
+                    message = str(exc)
+                    set_move_status(connection, plan, "copied_verified", message)
+                    delete_failed.append((plan, message))
+                else:
+                    set_move_status(connection, plan, "moved")
+                    moved += 1
+            cached_csv = export_readable_csv(connection, cached_csv_path(library_root))
+        finally:
+            connection.close()
+        try:
+            copy_snapshot(cached_db, database_path(library_root))
+            csv_path = copy_snapshot(cached_csv, csv_export_path(library_root))
+            csv_error = ""
+        except OSError as exc:
+            csv_path = None
+            csv_error = f"G 盘数据库或 CSV 快照同步失败：{exc}。F 盘缓存仍完整保留在 {cache_root(library_root)}"
+    except TransferError:
+        raise
+    except Exception as exc:
+        raise TransferError(str(exc), staging_root) from exc
+    return {"moved": moved, "delete_failed": delete_failed, "copy_failures": failures, "csv_path": csv_path, "csv_error": csv_error}
+
+
 class TagMoveApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -680,7 +808,7 @@ class TagMoveApp(tk.Tk):
         self.result_var = tk.StringVar(value="结果：尚未执行移动")
         self.summary_var = tk.StringVar(value="尚未扫描")
 
-        self._path_row(form, 0, "Tag 报告目录", self.report_var, "选择…", self._choose_reports)
+        self._path_row(form, 0, "Tag 报告目录（Log 来源）", self.report_var, "选择…", self._choose_reports)
         self._path_row(form, 1, "目标图片库", self.library_var, "选择…", self._choose_library)
         note = ttk.Label(
             form,
@@ -698,6 +826,8 @@ class TagMoveApp(tk.Tk):
         self.sync_button.pack(side="left", padx=(8, 0))
         self.cleanup_button = ttk.Button(actions, text="清理已归档报告", command=self._start_cleanup)
         self.cleanup_button.pack(side="left", padx=(8, 0))
+        self.resume_button = ttk.Button(actions, text="恢复中断移动", command=self._start_staging_recovery)
+        self.resume_button.pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="打开目标文件夹", command=self._open_library).pack(side="left", padx=(16, 0))
         ttk.Label(actions, textvariable=self.summary_var).pack(side="right")
 
@@ -761,6 +891,7 @@ class TagMoveApp(tk.Tk):
         self.move_button.configure(state="disabled" if busy or not any(plan.state in {"ready", "recovery"} for plan in self.plans) else "normal")
         self.sync_button.configure(state="disabled" if busy else "normal")
         self.cleanup_button.configure(state="disabled" if busy else "normal")
+        self.resume_button.configure(state="disabled" if busy else "normal")
 
     def _start_scan(self) -> None:
         if self.busy:
@@ -847,6 +978,47 @@ class TagMoveApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _start_staging_recovery(self) -> None:
+        if self.busy:
+            return
+        report_root = Path(self.report_var.get().strip())
+        library_root = Path(self.library_var.get().strip())
+        if not report_root.is_dir():
+            messagebox.showerror("无法恢复", "请选择有效的 Tag 报告目录，用于确认每个暂存副本的原图与标签。")
+            return
+        if not (library_root / STAGING_DIR_NAME).is_dir():
+            messagebox.showinfo("没有暂存任务", f"未找到暂存目录：\n{library_root / STAGING_DIR_NAME}")
+            return
+        self._set_busy(True)
+        self.status_var.set("正在扫描 .tag_move_staging 并与 Tag 报告匹配……")
+        self.phase_var.set("恢复中断移动：正在核对副本、原图与目标路径")
+        def worker() -> None:
+            try:
+                self.events.put(("staging_recovery_scanned", load_staging_recovery_plans(report_root, library_root)))
+            except Exception as exc:
+                self.events.put(("error", f"扫描暂存任务失败：{exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_staging_recovery(self, plans: list[MovePlan]) -> None:
+        workable = [plan for plan in plans if plan.state == "staging_ready"]
+        self._set_busy(True)
+        self.progress.configure(maximum=max(len(workable) * 3, 1), value=0)
+        self.status_var.set("正在重新校验暂存副本；校验通过后才会继续移动。")
+        self.phase_var.set(f"恢复中断移动：0/{len(workable) * 3}（0.0%）· 等待校验")
+        self.result_var.set("结果：正在恢复未完成的暂存移动，原图暂不会删除。")
+        library_root = Path(self.library_var.get().strip())
+        self.copy_failure_decisions = queue.Queue(maxsize=1)
+        def worker() -> None:
+            try:
+                result = execute_staging_recovery(workable, library_root, lambda kind, payload: self.events.put((kind, payload)), lambda _failures: self.copy_failure_decisions.get())
+                self.events.put(("staging_recovery_finished", result))
+            except TransferError as exc:
+                suffix = f"\n暂存副本位置：{exc.staging_dir}" if exc.staging_dir else ""
+                self.events.put(("error", f"恢复未完成：{exc}\n未删除任何尚未确认的原图。{suffix}"))
+            except Exception as exc:
+                self.events.put(("error", f"恢复未完成：{exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start_cleanup(self) -> None:
         if self.busy:
             return
@@ -896,6 +1068,7 @@ class TagMoveApp(tk.Tk):
         labels = {
             "ready": "准备移动", "recovery": "可恢复移动", "source_missing": "原图缺失",
             "already_moved": "已移动", "already_in_library": "已在图片库", "destination_conflict": "目标冲突",
+            "staging_ready": "可恢复暂存", "staging_source_missing": "暂存原图缺失", "staging_conflict": "暂存冲突",
         }
         # 仅展示前 2,000 条，完整清单仍由数据库和原始报告保存，避免大批量任务卡住界面。
         for plan in self.plans[:2000]:
@@ -922,10 +1095,31 @@ class TagMoveApp(tk.Tk):
                     )
                     self.phase_var.set(f"移动进度：计划已生成，可移动 {ready} 张")
                     self._set_busy(False)
-                elif kind in {"copy", "promote", "delete"}:
+                elif kind == "staging_recovery_scanned":
+                    plans, unmatched = payload
+                    self.plans = plans
+                    self._fill_table()
+                    ready = [plan for plan in plans if plan.state == "staging_ready"]
+                    blocked = len(plans) - len(ready)
+                    self.summary_var.set(f"暂存匹配 {len(plans)} 条；可恢复 {len(ready)} 条")
+                    self._set_busy(False)
+                    if not ready:
+                        self.status_var.set("没有可安全恢复的暂存副本。")
+                        self.phase_var.set("恢复中断移动：未发现可恢复项目")
+                        self.result_var.set(f"结果：暂存异常/不可恢复 {blocked} 条；未匹配暂存文件 {unmatched} 个。")
+                        messagebox.showinfo("没有可恢复的暂存任务", self.result_var.get())
+                    else:
+                        self.status_var.set(f"找到 {len(ready)} 个可恢复暂存副本；异常 {blocked} 个，未匹配 {unmatched} 个。")
+                        self.phase_var.set("恢复中断移动：已完成扫描，等待确认")
+                        if messagebox.askyesno("确认恢复中断移动", f"找到 {len(ready)} 张可恢复图片。\n\n程序会重新以 SHA-256 校验原图与 .tag_move_staging 中的副本，然后将副本整理到分类目录、写入数据库，最后删除原图。\n\n另有 {blocked} 条异常和 {unmatched} 个未匹配暂存文件，均会保留不动。\n\n是否继续恢复？", icon="warning"):
+                            self._run_staging_recovery(ready)
+                        else:
+                            self.status_var.set("已取消恢复中断移动。")
+                            self.phase_var.set("恢复中断移动：已取消")
+                elif kind in {"copy", "promote", "delete", "recover_verify", "recover_promote", "recover_delete"}:
                     index, total, plan = payload
-                    phase = {"copy": "复制并校验", "promote": "整理到分类目录", "delete": "删除已校验原图"}[kind]
-                    offset = {"copy": 0, "promote": total, "delete": total * 2}[kind]
+                    phase = {"copy": "复制并校验", "promote": "整理到分类目录", "delete": "删除已校验原图", "recover_verify": "重新校验暂存副本", "recover_promote": "整理暂存副本到分类目录", "recover_delete": "删除已校验原图"}[kind]
+                    offset = {"copy": 0, "promote": total, "delete": total * 2, "recover_verify": 0, "recover_promote": total, "recover_delete": total * 2}[kind]
                     overall = offset + index
                     full_total = total * 3
                     self.progress.configure(maximum=full_total, value=overall)
@@ -933,32 +1127,32 @@ class TagMoveApp(tk.Tk):
                     self.phase_var.set(
                         f"移动进度：{overall}/{full_total}（{overall / full_total * 100:.1f}%）· {phase} {index}/{total}"
                     )
-                elif kind == "copy_failures":
+                elif kind in {"copy_failures", "recovery_failures"}:
                     failures, verified_count, total_count = payload
                     details = "\n".join(
                         f"{failure.plan.entry.source.name}：{failure.error}" for failure in failures[:10]
                     )
                     more = f"\n……另有 {len(failures) - 10} 张失败图片。" if len(failures) > 10 else ""
                     warning = (
-                        f"已完成复制校验：{verified_count}/{total_count} 张成功，{len(failures)} 张失败。\n\n"
+                        f"已完成{'暂存副本校验' if kind == 'recovery_failures' else '复制校验'}：{verified_count}/{total_count} 张成功，{len(failures)} 张失败。\n\n"
                         "选择“是”会跳过失败图片，仅移动已成功校验的图片；失败图片的原文件会保留，"
                         "下次扫描后可重新尝试。\n\n"
                         "选择“否”会中止本次移动，不删除任何原图。\n\n"
                         f"失败明细：\n{details}{more}"
                     )
-                    self.status_var.set(f"复制/校验失败 {len(failures)} 张，等待确认是否跳过。")
+                    self.status_var.set(f"{'暂存副本校验' if kind == 'recovery_failures' else '复制/校验'}失败 {len(failures)} 张，等待确认是否跳过。")
                     self.phase_var.set("移动进度：等待确认失败图片的处理方式")
                     continue_with_verified = messagebox.askyesno(
                         "复制或校验失败", warning, icon="warning",
                     )
                     if self.copy_failure_decisions is not None:
                         self.copy_failure_decisions.put(continue_with_verified)
-                elif kind == "copy_ready":
+                elif kind in {"copy_ready", "recovery_ready"}:
                     verified_count, failed_count = payload
                     total = verified_count * 3
                     self.progress.configure(maximum=max(total, 1), value=verified_count)
                     suffix = f"；已跳过 {failed_count} 张失败图片" if failed_count else ""
-                    self.status_var.set(f"复制与校验完成：可继续处理 {verified_count} 张{suffix}。")
+                    self.status_var.set(f"{'暂存副本校验' if kind == 'recovery_ready' else '复制与校验'}完成：可继续处理 {verified_count} 张{suffix}。")
                     self.phase_var.set(
                         f"移动进度：{verified_count}/{total}（33.3%）· 等待整理到分类目录"
                     )
@@ -992,6 +1186,20 @@ class TagMoveApp(tk.Tk):
                             "安全移动完成",
                             f"已移动 {result['moved']} 张图片。\n\n标签数据库：\n{database_path(Path(self.library_var.get().strip()))}\n\n可读 CSV：\n{result['csv_path']}",
                         )
+                    self._start_scan()
+                elif kind == "staging_recovery_finished":
+                    self._set_busy(False)
+                    result = payload
+                    failed = result["delete_failed"]
+                    skipped = result["copy_failures"]
+                    self.status_var.set(f"中断移动恢复结束：已移动 {result['moved']} 张；跳过校验失败 {len(skipped)} 张；删除失败 {len(failed)} 张。")
+                    self.phase_var.set(f"恢复中断移动：完成（{result['moved']} 张已移动）")
+                    self.result_var.set(f"结果：已恢复 {result['moved']} 张；CSV 标签清单：{result['csv_path'] or 'F 盘缓存仍可用'}")
+                    if failed or result["csv_error"]:
+                        details = "\n".join(f"{plan.entry.source.name}：{error}" for plan, error in failed[:10])
+                        messagebox.showwarning("中断移动恢复已完成，但有项目待处理", f"已恢复 {result['moved']} 张。\n删除失败 {len(failed)} 张。\n{result['csv_error']}\n\n{details}")
+                    else:
+                        messagebox.showinfo("中断移动已恢复", f"已恢复 {result['moved']} 张图片。\n\nCSV 标签清单：\n{result['csv_path']}")
                     self._start_scan()
                 elif kind == "sync_finished":
                     self._set_busy(False)
