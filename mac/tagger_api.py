@@ -28,6 +28,8 @@ register_heif_opener()
 MODEL_PRESETS = {
     "4b": "mlx-community/Qwen3-VL-4B-Instruct-4bit",
     "8b": "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+    "3.5-4b": "mlx-community/Qwen3.5-4B-MLX-4bit",
+    "3.5-9b": "mlx-community/Qwen3.5-9B-MLX-4bit",
 }
 DEFAULT_PRESET = os.environ.get("MODEL_PRESET", "4b").lower()
 INITIAL_MODEL_ID = os.environ.get("MODEL_ID", MODEL_PRESETS.get(DEFAULT_PRESET, MODEL_PRESETS["4b"]))

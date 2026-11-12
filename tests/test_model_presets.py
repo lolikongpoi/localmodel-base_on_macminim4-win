@@ -20,6 +20,13 @@ spec.loader.exec_module(remote)
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_qwen35_candidates_preserve_qwen3_support(self):
+        presets = tagger_api.list_models()["presets"]
+        self.assertEqual(presets["4b"], "mlx-community/Qwen3-VL-4B-Instruct-4bit")
+        self.assertEqual(presets["8b"], "mlx-community/Qwen3-VL-8B-Instruct-4bit")
+        self.assertEqual(presets["3.5-4b"], "mlx-community/Qwen3.5-4B-MLX-4bit")
+        self.assertEqual(presets["3.5-9b"], "mlx-community/Qwen3.5-9B-MLX-4bit")
+
     def test_new_preset_is_listed_and_switchable(self):
         catalog = {"future-9b": "example/New-Vision-9B"}
         with patch.dict(tagger_api.MODEL_PRESETS, catalog, clear=True), \
