@@ -21,6 +21,7 @@ Windows 安全归档 → 分类图片库 + SQLite / CSV 标签库
 | 路径 | 作用 |
 |---|---|
 | [`mac/`](mac/) | Mac 端 FastAPI 服务、内置测试页及安装/启动脚本。 |
+| [`remote_web/`](remote_web/) | 8788 批量识别控制台，从 Mac 服务动态读取可选模型。 |
 | [`win/preprocessing/`](win/preprocessing/) | QQ 群聊图片缓存预分类：预览、复制或移动。 |
 | [`win/tagging_by_mac/`](win/tagging_by_mac/) | Windows 图形客户端：向 Mac 提交图片并实时写入 Tag 报告。 |
 | [`win/moving/`](win/moving/) | Windows 安全归档：复制、SHA-256 校验、登记数据库后才删除原图。 |
@@ -43,6 +44,8 @@ export TAGGER_API_KEY='替换为至少 24 位的随机密钥'
 默认监听 `0.0.0.0:8787`。在 Mac 上运行 `ipconfig getifaddr en0` 可查看常见 Wi-Fi 网卡的局域网地址；然后在同一网络的浏览器打开 `http://MAC_LAN_IP:8787/` 做单图测试。
 
 默认模型为 Qwen3-VL 4B 量化版；8B 预设更慢且首次会下载更多文件。模型、性能、HEIC 和安全边界见 [`mac/README.md`](mac/README.md)。
+
+8787 和 8788 的模型选项均来自 Mac 服务的 `MODEL_PRESETS`；添加预设并重启 Mac 服务后，在页面刷新列表即可。8788 的安装与启动见 [`remote_web/README.md`](remote_web/README.md)。
 
 ## Windows：首次准备
 
@@ -96,3 +99,14 @@ Windows 客户端与 Mac 服务的连接、API key、超时和错误处理详见
 本仓库代码采用 [MIT License](LICENSE)。模型权重与第三方依赖不随仓库分发，使用前请自行阅读其许可条款；Qwen3-VL 及 MLX-VLM 的版本和兼容性以各自上游发布为准。
 
 发布前请至少完成：Mac 单图测试、Windows 客户端连通性测试、一次预处理预览，以及使用可丢弃样本进行一次安全归档验证。
+
+## 模型列表回归检查
+
+不加载或下载模型即可运行以下检查：
+
+```zsh
+mac/.venv/bin/python -m unittest discover -s tests -v
+node tests/test_model_selectors.cjs
+```
+
+前者验证模型预设与 8788 转发，后者验证两端页面的动态选项、未知当前模型、空列表、过期请求及忙碌状态；前端检查需要 Node.js。

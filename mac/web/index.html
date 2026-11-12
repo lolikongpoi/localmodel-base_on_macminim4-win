@@ -42,7 +42,14 @@
     .key-field input:focus { border-color: var(--purple); box-shadow: 0 0 0 3px #9c8cff24; }
     .key-visibility { width: auto; margin: 0; padding: 0 13px; font-size: 13px; background: #252839; white-space: nowrap; }
     .hint { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
-    .model-picker { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; margin-top: 18px; }
+    .hint a { color: #beb4ff; text-decoration: none; }
+    .hint a:hover { text-decoration: underline; }
+    .model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: end; margin-top: 18px; }
+    .console-control { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 18px; padding: 11px; border: 1px solid var(--line); border-radius: 11px; background: #11131a; }
+    .console-control strong { font-size: 13px; }
+    .console-state { color: var(--muted); font-size: 12px; margin-right: auto; }
+    .console-control button { width: auto; margin: 0; padding: 8px 10px; font-size: 12px; }
+    .console-control .stop-console { background: #57313d; }
     select { width: 100%; color: var(--text); background: #11131a; border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font: inherit; outline: none; }
     .model-picker button { width: auto; margin: 0; padding: 11px 15px; font-size: 13px; }
     .drop-zone { position: relative; min-height: 252px; border: 1.5px dashed #555b6c; border-radius: 14px; display: grid; place-items: center; text-align: center; padding: 20px; cursor: pointer; transition: .18s ease; overflow: hidden; }
@@ -87,6 +94,7 @@
         <div class="eyebrow">Private LAN · Image Tagger</div>
         <h1>图片识别测试台</h1>
         <p class="subtitle">上传一张图片，检查分类、中文标签与角色候选。</p>
+        <p class="hint"><a id="remote-console-link" href="http://127.0.0.1:8788/">打开批量远程控制台（手动输入路径）↗</a></p>
       </div>
       <div class="status"><span class="dot"></span><span id="status-text">服务已连接</span></div>
     </header>
@@ -101,10 +109,18 @@
         </div>
         <p class="hint">只保存在此浏览器标签页，刷新或关闭后不会留存。</p>
         <div class="model-picker">
-          <div><label for="model-preset">推理模型</label><select id="model-preset"><option value="4b">4B · 更快</option><option value="8b">8B · 更细致</option></select></div>
+          <div><label for="model-preset">推理模型</label><select id="model-preset" disabled><option value="">输入密钥后读取模型列表</option></select></div>
+          <button id="refresh-models" type="button" disabled>刷新列表</button>
           <button id="switch-model" type="button" disabled>切换</button>
         </div>
-        <p class="hint">切换会暂停识别并重新加载模型；首次选择 8B 需要下载约 5.8GB。</p>
+        <p class="hint">可选模型由后端提供；切换会等待当前识别完成并加载模型，首次使用可能需要下载。</p>
+        <div class="console-control">
+          <strong>批量控制台 · 8788</strong>
+          <span id="console-state" class="console-state">输入 API key 后检查</span>
+          <button id="refresh-console" type="button" class="key-visibility">检查</button>
+          <button id="start-console" type="button" disabled>启动</button>
+          <button id="stop-console" type="button" class="stop-console" disabled>停止</button>
+        </div>
 
         <input id="file-input" type="file" accept="image/*">
         <div id="drop-zone" class="drop-zone" role="button" tabindex="0" aria-label="选择图片">
@@ -150,19 +166,30 @@
     const apiKey = document.querySelector('#api-key');
     const toggleApiKey = document.querySelector('#toggle-api-key');
     const modelPreset = document.querySelector('#model-preset');
+    const refreshModels = document.querySelector('#refresh-models');
     const switchModel = document.querySelector('#switch-model');
+    const consoleState = document.querySelector('#console-state');
+    const refreshConsole = document.querySelector('#refresh-console');
+    const startConsole = document.querySelector('#start-console');
+    const stopConsole = document.querySelector('#stop-console');
     const submit = document.querySelector('#submit');
     const errorBox = document.querySelector('#error');
     const loading = document.querySelector('#loading');
     const openedAsFile = window.location.protocol === 'file:';
     let selectedFile = null;
     let previewUrl = null;
+    let modelListRequest = 0;
+    let modelSwitchBusy = false;
+    const remoteConsoleLink = document.querySelector('#remote-console-link');
+    remoteConsoleLink.href = window.location.protocol + '//' + window.location.hostname + ':8788/';
 
     apiKey.value = sessionStorage.getItem('tagger-api-key') || '';
     apiKey.addEventListener('input', () => {
       sessionStorage.setItem('tagger-api-key', apiKey.value);
+      resetModelOptions('密钥已更改，请读取模型列表');
       updateButton();
       updateSwitchButton();
+      updateConsoleButtons();
     });
     toggleApiKey.addEventListener('click', () => {
       const isHidden = apiKey.type === 'password';
@@ -172,7 +199,23 @@
       apiKey.focus();
     });
     function updateButton() { submit.disabled = openedAsFile || !(selectedFile && apiKey.value.trim()); }
-    function updateSwitchButton() { switchModel.disabled = openedAsFile || !apiKey.value.trim(); }
+    function updateSwitchButton() {
+      const unavailable = openedAsFile || !apiKey.value.trim() || modelSwitchBusy;
+      refreshModels.disabled = unavailable;
+      switchModel.disabled = unavailable || modelPreset.disabled || !modelPreset.value;
+    }
+    function resetModelOptions(message) {
+      modelListRequest++;
+      modelPreset.replaceChildren(new Option(message, ''));
+      modelPreset.disabled = true;
+      updateSwitchButton();
+    }
+    function updateConsoleButtons(status, managed = false) {
+      const hasKey = !openedAsFile && !!apiKey.value.trim();
+      refreshConsole.disabled = !hasKey;
+      startConsole.disabled = !hasKey || status === 'running';
+      stopConsole.disabled = !hasKey || status !== 'running' || !managed;
+    }
     function showError(message) { errorBox.textContent = message; errorBox.classList.add('visible'); }
     function clearError() { errorBox.classList.remove('visible'); errorBox.textContent = ''; }
     function selectFile(file) {
@@ -211,13 +254,44 @@
       }
       document.querySelector('#model').textContent = `模型：${data.model || '本地模型'}`;
     }
-    function presetFromModel(model) { return model.includes('8B') ? '8b' : '4b'; }
     async function refreshModel() {
+      if (openedAsFile || !apiKey.value.trim()) return;
+      resetModelOptions('正在读取模型列表…');
+      const request = modelListRequest;
+      try {
+        const response = await fetch('/v1/models', { headers: { 'X-API-Key': apiKey.value.trim() } });
+        const data = await response.json().catch(() => ({}));
+        if (request !== modelListRequest) return;
+        if (!response.ok) throw new Error(data.detail || '无法读取模型列表，请检查密钥。');
+        const entries = Object.entries(data.presets || {}).filter(([key, model]) => key && typeof model === 'string' && model);
+        if (!entries.length) throw new Error('后端没有提供可用的模型预设。');
+        modelPreset.replaceChildren(...entries.map(([key, model]) => new Option(model.split('/').pop(), key)));
+        const current = entries.find(([, model]) => model === data.current_model);
+        if (current) modelPreset.value = current[0];
+        else {
+          const option = new Option('当前（未配置预设）：' + (data.current_model || '未知'), '', true, true);
+          option.disabled = true;
+          modelPreset.prepend(option);
+        }
+        modelPreset.disabled = false;
+        document.querySelector('#model').textContent = '当前模型：' + (data.current_model || '未知');
+      } catch (error) {
+        if (request !== modelListRequest) return;
+        resetModelOptions('读取失败，请重试');
+        throw error;
+      } finally { updateSwitchButton(); }
+    }
+    modelPreset.addEventListener('change', updateSwitchButton);
+    refreshModels.addEventListener('click', () => refreshModel().catch(error => showError(error.message)));
+    async function refreshConsoleStatus() {
       if (!apiKey.value.trim()) return;
-      const response = await fetch('/v1/models', { headers: { 'X-API-Key': apiKey.value.trim() } });
-      if (!response.ok) throw new Error('无法读取当前模型，请检查密钥。');
-      const data = await response.json();
-      modelPreset.value = presetFromModel(data.current_model);
+      const response = await fetch('/v1/batch-console/status', { headers: { 'X-API-Key': apiKey.value.trim() } });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || '无法读取批量控制台状态。');
+      const running = data.status === 'running';
+      consoleState.textContent = running ? '运行中 · 端口 ' + data.port : '未运行 · 端口 ' + data.port;
+      updateConsoleButtons(data.status, data.managed_by_tagger);
+      return data;
     }
     submit.addEventListener('click', async () => {
       if (!selectedFile || !apiKey.value.trim()) return;
@@ -232,19 +306,48 @@
       finally { loading.classList.remove('visible'); updateButton(); }
     });
     switchModel.addEventListener('click', async () => {
-      clearError(); submit.disabled = true; switchModel.disabled = true; loading.classList.add('visible');
-      loading.lastChild.textContent = modelPreset.value === '8b' ? '正在切换至 8B；首次使用会下载并加载模型，请耐心等待…' : '正在切换至 4B 并释放内存…';
+      if (!modelPreset.value || modelPreset.disabled) return;
+      const preset = modelPreset.value;
+      clearError(); submit.disabled = true; modelSwitchBusy = true; updateSwitchButton(); loading.classList.add('visible');
+      loading.lastChild.textContent = '正在加载 ' + modelPreset.selectedOptions[0].textContent + '；首次使用可能需要下载，请耐心等待…';
       try {
-        const response = await fetch('/v1/model', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey.value.trim() }, body: JSON.stringify({ preset: modelPreset.value }) });
+        const response = await fetch('/v1/model', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-API-Key': apiKey.value.trim() }, body: JSON.stringify({ preset }) });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || `服务返回 ${response.status}`);
         document.querySelector('#model').textContent = `当前模型：${data.model}`;
       } catch (error) { showError(`模型切换失败：${error.message}`); }
       finally {
+        modelSwitchBusy = false;
         loading.classList.remove('visible'); loading.lastChild.textContent = '正在识别，较大图片可能需要一点时间…'; updateButton(); updateSwitchButton();
+        refreshModel().catch(error => showError(error.message));
       }
     });
-    apiKey.addEventListener('change', () => refreshModel().catch(error => showError(error.message)));
+    refreshConsole.addEventListener('click', () => refreshConsoleStatus().catch(error => showError(error.message)));
+    startConsole.addEventListener('click', async () => {
+      clearError(); startConsole.disabled = true;
+      try {
+        const response = await fetch('/v1/batch-console/start', { method: 'POST', headers: { 'X-API-Key': apiKey.value.trim() } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || '无法启动批量控制台。');
+        consoleState.textContent = '运行中 · 端口 ' + data.port;
+        updateConsoleButtons('running', data.managed_by_tagger);
+      } catch (error) { showError('启动失败：' + error.message); updateConsoleButtons('stopped'); }
+    });
+    stopConsole.addEventListener('click', async () => {
+      if (!confirm('停止后批量控制台页面将无法访问，确认继续？')) return;
+      clearError(); stopConsole.disabled = true;
+      try {
+        const response = await fetch('/v1/batch-console/stop', { method: 'POST', headers: { 'X-API-Key': apiKey.value.trim() } });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.detail || '无法停止批量控制台。');
+        consoleState.textContent = '未运行 · 端口 ' + data.port;
+        updateConsoleButtons('stopped', false);
+      } catch (error) { showError('停止失败：' + error.message); refreshConsoleStatus().catch(() => {}); }
+    });
+    apiKey.addEventListener('change', () => {
+      refreshModel().catch(error => showError(error.message));
+      refreshConsoleStatus().catch(error => showError(error.message));
+    });
     if (openedAsFile) {
       document.querySelector('.dot').style.background = 'var(--danger)';
       document.querySelector('#status-text').textContent = '请通过服务地址打开页面';
@@ -257,6 +360,7 @@
       });
     }
     updateSwitchButton();
+    updateConsoleButtons();
     refreshModel().catch(error => showError(error.message));
   </script>
 </body>

@@ -334,9 +334,9 @@ async def stop_batch_console() -> dict[str, Any]:
 
 @app.post("/v1/model", dependencies=[Depends(_require_api_key)])
 async def switch_model(request: ModelSwitchRequest) -> dict[str, str]:
-    target = MODEL_PRESETS.get(request.preset.lower())
+    target = MODEL_PRESETS.get(request.preset.strip().lower())
     if not target:
-        raise HTTPException(400, "preset must be '4b' or '8b'")
+        raise HTTPException(400, "未知模型预设，可选值：" + ", ".join(MODEL_PRESETS))
     async with inference_lock:
         previous = runtime.get("model_id")
         if previous == target:

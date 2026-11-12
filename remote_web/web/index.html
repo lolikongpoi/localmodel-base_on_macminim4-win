@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>图片批量识别 · 远程控制台</title>
+  <style>
+    :root{color-scheme:dark;--bg:#10121a;--card:#1b1f2b;--line:#363d50;--text:#f2f5ff;--muted:#a3acbf;--brand:#9383ff;--ok:#70dca8;--bad:#ff929b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#342968,transparent 36rem),var(--bg);color:var(--text);min-height:100vh}main{max-width:1180px;margin:auto;padding:42px 20px}h1{font-size:38px;letter-spacing:-.04em;margin:6px 0}h2{font-size:17px;margin:0 0 16px}.eyebrow{color:var(--brand);font-size:12px;font-weight:800;letter-spacing:.1em}.lead,.hint{color:var(--muted);line-height:1.5}.lead{margin:0 0 26px}.grid{display:grid;grid-template-columns:400px 1fr;gap:18px}.card{background:#1b1f2bea;border:1px solid var(--line);border-radius:17px;padding:20px}label{display:block;color:var(--muted);font-size:12px;font-weight:700;margin:14px 0 6px}input,select{width:100%;border:1px solid var(--line);border-radius:9px;background:#111521;color:var(--text);padding:11px;font:inherit}.twocol{display:grid;grid-template-columns:1fr 1fr;gap:10px}.checks{display:grid;gap:9px;margin-top:15px}.checks label{margin:0;font-weight:500}.checks input{width:auto;accent-color:var(--brand)}button{border:0;border-radius:9px;background:linear-gradient(135deg,var(--brand),#6858e8);color:#fff;font:700 14px inherit;padding:11px 13px;cursor:pointer}button:disabled{opacity:.5;cursor:wait}.secondary{background:#2d3549}.danger{background:#71313c}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.actions button{flex:1}.wide{width:100%;margin-top:18px}.notice{display:none;margin-top:14px;padding:10px;border-radius:9px;background:#ff92921e;color:#ffb0b7;font-size:13px}.notice.show{display:block}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:15px}.metric{border:1px solid var(--line);background:#22293a;border-radius:10px;padding:11px}.metric b{display:block;font-size:22px}.metric span{color:var(--muted);font-size:12px}.bar{height:8px;background:#111521;border-radius:8px;overflow:hidden}.bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--brand),var(--ok));transition:width .2s}.timing{color:var(--muted);font-size:13px;margin:11px 0 4px;display:flex;flex-wrap:wrap;gap:8px}.timing span{display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.display-settings{margin:10px 0;border:1px solid var(--line);border-radius:9px;padding:8px 10px;background:#141927}.display-settings summary{cursor:pointer;color:var(--muted);font-size:12px}.display-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:9px}.display-item{display:grid;grid-template-columns:auto 1fr auto;gap:7px;align-items:center;color:var(--muted);font-size:12px}.display-item input[type=checkbox]{width:auto;accent-color:var(--brand)}.display-item input[type=range]{width:100%;padding:0;accent-color:var(--brand)}.display-item output{font-variant-numeric:tabular-nums;color:var(--text);min-width:40px;text-align:right}.debug-panel{margin-top:12px;border:1px solid #665a9b;border-radius:9px;padding:8px 10px;background:#121622}.debug-panel summary{cursor:pointer;color:#c3baff;font-size:12px}.debug-panel pre{max-height:240px;overflow:auto;margin:9px 0 0;padding:10px;border-radius:6px;background:#080b12;color:#d9e0f2;font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word}.current{min-height:42px;margin:12px 0;color:var(--muted);font-size:13px;word-break:break-all}.downloads{display:none;gap:8px;flex-wrap:wrap;margin-top:15px}.downloads.show{display:flex}table{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;margin-top:18px}th,td{padding:9px 6px;text-align:left;border-bottom:1px solid var(--line);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}th{color:var(--muted);font-size:11px}.ok{color:var(--ok)}.bad{color:var(--bad)}.tag{display:inline-block;padding:2px 5px;background:#2b3346;border-radius:4px;margin:1px;font-size:11px}footer{color:#7d879a;font-size:12px;margin-top:20px}@media(max-width:850px){.grid{grid-template-columns:1fr}.metrics{grid-template-columns:repeat(2,1fr)}}@media(max-width:600px){.display-grid{grid-template-columns:1fr}}@media(max-width:480px){main{padding:27px 12px}h1{font-size:30px}.twocol{grid-template-columns:1fr}}
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">REMOTE · MAC IMAGE TAGGER</div><h1>图片批量识别控制台</h1><p class="lead">手动输入服务端图片目录，远程控制 Mac 模型顺序处理并下载报告。</p>
+  <div class="grid">
+    <section class="card"><h2>任务设置</h2>
+      <label>图片文件夹路径</label><input id="folder" placeholder="/Volumes/分类/… 或 smb://服务器/共享/…"><p class="hint">路径位于运行本 Web 服务的机器；支持已挂载共享的 SMB 地址并自动转换。</p>
+      <label>结果保存路径</label><input id="output" value="smb://lolikong-deskto/分类/本地识别/通过mac识别/mac_tag_reports" placeholder="留空则保存至 remote_web/reports"><p class="hint">也可输入已挂载共享的 SMB 地址；将自动建立带时间戳的任务子目录。</p>
+      <label>对应的 Windows 图片文件夹路径</label><input id="windows-folder" placeholder="例如 D:\\分类\\本地识别\\通过mac识别">
+      <div class="checks"><label><input id="use-windows-path" type="checkbox">以 Windows 路径写入报告，并按 Windows 路径读取已有 Tag</label></div>
+      <div class="checks"><label><input id="debug-raw" type="checkbox">调试：显示模型原始返回（仅本次任务）</label></div>
+      <div class="actions"><button id="count-files" class="secondary">统计图片数量</button><button id="check-tags" class="secondary">检查已有 Tag</button></div>
+      <p id="path-info" class="hint">输入路径后可先检查服务端是否能读取。</p>
+      <label>Mac 服务地址</label><input id="url" value="http://localhost:8787" placeholder="http://localhost:8787">
+      <label>Mac API key</label><input id="key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
+      <label>远程访问口令（如有）</label><input id="access" type="password" autocomplete="off">
+      <div class="twocol"><div><label>最多图片数</label><input id="count" placeholder="全部"></div><div><label>最长时间（分钟）</label><input id="minutes" placeholder="不限"></div></div>
+      <div class="checks"><label><input id="recursive" type="checkbox" checked>递归扫描子目录</label><label><input id="skip" type="checkbox" checked>跳过已有成功记录</label></div>
+      <div class="actions"><button id="health" class="secondary">检查联通</button><button id="models" class="secondary">读取模型</button></div>
+      <div class="twocol"><div><label>模型预设</label><select id="preset" disabled><option value="">请先读取模型列表</option></select></div><div style="display:flex;align-items:end"><button id="switch" class="secondary wide" disabled>切换模型</button></div></div>
+      <p id="model-info" class="hint">未读取模型状态。</p><button id="start" class="wide">开始批量识别</button>
+      <button id="restart-console" class="secondary wide" type="button">重启 8788 控制台服务</button>
+      <p class="hint">重启会重新加载网页与后台代码；若任务正在处理，当前那张图片会中断，但已写入报告的结果会保留。</p>
+      <div id="notice" class="notice"></div>
+    </section>
+    <section class="card"><h2 id="state">任务进度</h2>
+      <div class="metrics"><div class="metric"><b id="done">0</b><span>已处理</span></div><div class="metric"><b id="total">–</b><span>计划处理</span></div><div class="metric"><b id="success">0</b><span>成功</span></div><div class="metric"><b id="failed">0</b><span>失败</span></div></div>
+      <div class="bar"><i id="bar"></i></div>
+      <div id="timing" class="timing"><span id="elapsed">已用时间：–</span><span id="remaining">预计剩余：–</span><span id="finish-at">预计完成：–</span></div>
+      <details class="display-settings"><summary>显示设置：单项显示、隐藏和宽度</summary><div class="display-grid">
+        <label class="display-item"><input type="checkbox" data-toggle="file" checked>文件<input type="range" data-width="file" min="90" max="420" value="170"><output data-width-label="file">170</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="status" checked>状态<input type="range" data-width="status" min="55" max="160" value="76"><output data-width-label="status">76</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="category" checked>类别<input type="range" data-width="category" min="70" max="220" value="110"><output data-width-label="category">110</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="tags" checked>标签<input type="range" data-width="tags" min="100" max="400" value="180"><output data-width-label="tags">180</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="character" checked>人物<input type="range" data-width="character" min="70" max="300" value="120"><output data-width-label="character">120</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="duration" checked>单张耗时<input type="range" data-width="duration" min="55" max="160" value="72"><output data-width-label="duration">72</output></label>
+        <label class="display-item"><input type="checkbox" data-toggle="detail" checked>摘要 / 错误<input type="range" data-width="detail" min="120" max="480" value="250"><output data-width-label="detail">250</output></label>
+      </div></details>
+      <div id="current" class="current">尚未开始任务。</div>
+      <div class="actions"><button id="pause" class="secondary" disabled>暂停</button><button id="stop" class="danger" disabled>停止（当前图片完成后）</button></div>
+      <div id="downloads" class="downloads"><button data-report="csv" class="secondary">下载 CSV</button><button data-report="jsonl" class="secondary">下载 JSONL</button><button data-report="summary" class="secondary">下载摘要</button></div>
+      <details id="debug-panel" class="debug-panel" hidden><summary>模型原始返回（最新一张，含解析错误）</summary><pre id="debug-output"></pre></details>
+      <div style="overflow:auto"><table><thead><tr><th data-display="file">文件</th><th data-display="status">状态</th><th data-display="category">类别</th><th data-display="tags">标签</th><th data-display="character">人物</th><th data-display="duration">耗时</th><th data-display="detail">摘要 / 错误</th></tr></thead><tbody id="rows"><tr><td colspan="7" style="text-align:center;color:#a3acbf">结果会显示在这里。</td></tr></tbody></table></div>
+    </section>
+  </div><footer>API key 和访问口令不写入报告；暂停与停止会在当前图片完成后生效。</footer>
+</main>
+<script>
+const $=s=>document.querySelector(s),ids=['folder','output','windows-folder','use-windows-path','debug-raw','url','key','access','count','minutes','recursive','skip'];let runId=null,timer=null,controlsBusy=false,modelListRequest=0,modelListReady=false;
+for(const id of ids){const n=$('#'+id),v=sessionStorage.getItem('tagger-'+id);if(v!==null)n.type==='checkbox'?n.checked=v==='1':n.value=v;n.addEventListener('input',()=>sessionStorage.setItem('tagger-'+id,n.type==='checkbox'?(n.checked?'1':'0'):n.value))}
+function headers(){const t=$('#access').value.trim();return {'Content-Type':'application/json',...(t?{'X-Remote-Access-Token':t}:{})}}
+function number(v,int){v=v.trim();if(!v)return null;const n=int?parseInt(v,10):parseFloat(v);if(!Number.isFinite(n)||n<=0)throw Error(int?'最多图片数必须是正整数':'最长时间必须是正数');return n}
+function data(extra={}){return {folder:$('#folder').value.trim(),output_folder:$('#output').value.trim()||null,windows_folder:$('#windows-folder').value.trim()||null,use_windows_path:$('#use-windows-path').checked,debug_model_response:$('#debug-raw').checked,service_url:$('#url').value.trim(),api_key:$('#key').value.trim(),recursive:$('#recursive').checked,skip_completed:$('#skip').checked,max_images:number($('#count').value,true),max_minutes:number($('#minutes').value,false),...extra}}
+function folderData(checkCompleted){return {folder:$('#folder').value.trim(),output_folder:$('#output').value.trim()||null,windows_folder:$('#windows-folder').value.trim()||null,use_windows_path:$('#use-windows-path').checked,recursive:$('#recursive').checked,check_completed:checkCompleted}}
+async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...headers(),...(opt.headers||{})}}),d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'请求失败（HTTP '+r.status+'）');return d}
+function say(s,bad=false){const n=$('#notice');n.textContent=s;n.classList.toggle('show',!!s);n.style.background=bad?'#ff92921e':'#70dca81e';n.style.color=bad?'#ffb0b7':'#a6f1cf'}
+function updateModelControls(){$('#preset').disabled=controlsBusy||!modelListReady;$('#switch').disabled=controlsBusy||!modelListReady||!$('#preset').value}
+function busy(v){controlsBusy=v;['start','health','models','restart-console'].forEach(id=>$('#'+id).disabled=v);updateModelControls()}
+function resetModelOptions(message='请先读取模型列表'){modelListRequest++;modelListReady=false;$('#preset').replaceChildren(new Option(message,''));updateModelControls()}
+function serviceData(){return {service_url:$('#url').value.trim(),api_key:$('#key').value.trim()}}
+async function refreshModels(){
+  resetModelOptions('正在读取模型列表…');
+  const request=modelListRequest;
+  try{
+    const r=await api('/api/service/models',{method:'POST',body:JSON.stringify(serviceData())});
+    if(request!==modelListRequest)return;
+    const entries=Object.entries(r.presets||{}).filter(([key,model])=>key&&typeof model==='string'&&model);
+    if(!entries.length)throw Error('后端没有提供可用的模型预设。');
+    $('#preset').replaceChildren(...entries.map(([key,model])=>new Option(model.split('/').pop(),key)));
+    const current=entries.find(([,model])=>model===r.current_model);
+    if(current)$('#preset').value=current[0];
+    else{const option=new Option('当前（未配置预设）：'+(r.current_model||'未知'),'',true,true);option.disabled=true;$('#preset').prepend(option)}
+    modelListReady=true;$('#model-info').textContent='当前模型：'+(r.current_model||'未知');
+  }catch(e){if(request!==modelListRequest)return;resetModelOptions('读取失败，请重试');$('#model-info').textContent='无法读取模型列表：'+e.message;throw e}
+  finally{updateModelControls()}
+}
+$('#preset').addEventListener('change',updateModelControls);
+['url','key','access'].forEach(id=>{const node=$('#'+id);node.addEventListener('input',()=>resetModelOptions('连接信息已更改，请读取模型列表'));node.addEventListener('change',()=>{if(!controlsBusy&&$('#url').value.trim()&&$('#key').value.trim())act(refreshModels)})});
+function esc(v){const d=document.createElement('div');d.textContent=v||'';return d.innerHTML}
+const displayDefaults={file:{visible:true,width:170},status:{visible:true,width:76},category:{visible:true,width:110},tags:{visible:true,width:180},character:{visible:true,width:120},duration:{visible:true,width:72},detail:{visible:true,width:250}};
+let displaySettings={};
+try{displaySettings=JSON.parse(localStorage.getItem('tagger-display-settings')||'null')||{}}catch(_){displaySettings={}}
+for(const key of Object.keys(displayDefaults)){displaySettings[key]={...displayDefaults[key],...(displaySettings[key]||{})}}
+function applyDisplaySettings(){for(const key of Object.keys(displaySettings)){const setting=displaySettings[key];document.querySelectorAll('[data-display="'+key+'"]').forEach(node=>{const tableCell=['TH','TD'].includes(node.tagName);node.style.display=setting.visible?(tableCell?'':'inline-block'):'none';node.style.width=setting.width+'px'});const toggle=document.querySelector('[data-toggle="'+key+'"]'),range=document.querySelector('[data-width="'+key+'"]'),label=document.querySelector('[data-width-label="'+key+'"]');if(toggle)toggle.checked=setting.visible;if(range)range.value=setting.width;if(label)label.textContent=setting.width+'px'}}
+document.querySelectorAll('[data-toggle]').forEach(node=>node.addEventListener('change',()=>{displaySettings[node.dataset.toggle].visible=node.checked;localStorage.setItem('tagger-display-settings',JSON.stringify(displaySettings));applyDisplaySettings()}));
+document.querySelectorAll('[data-width]').forEach(node=>node.addEventListener('input',()=>{displaySettings[node.dataset.width].width=Number(node.value);localStorage.setItem('tagger-display-settings',JSON.stringify(displaySettings));applyDisplaySettings()}));
+applyDisplaySettings();
+function duration(value){if(value===null||value===undefined)return '计算中';const n=Math.max(0,Math.round(Number(value)||0)),d=Math.floor(n/86400),h=Math.floor(n%86400/3600),m=Math.floor(n%3600/60),s=n%60;return d?d+'天'+h+'小时'+m+'分':h?h+'小时'+m+'分':m?m+'分'+s+'秒':s+'秒'}
+function finishTime(seconds){if(seconds===null||seconds===undefined)return '等待首张图片';return new Date(Date.now()+Number(seconds)*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}
+function render(x){const state={preparing:'正在准备',running:'正在识别',paused:'任务已暂停',finished:'任务已结束',failed:'任务失败'}[x.state]||x.state;$('#state').textContent='任务进度 · '+state;$('#done').textContent=x.processed;$('#total').textContent=x.planned_total||'–';$('#success').textContent=x.successful;$('#failed').textContent=x.failed;$('#bar').style.width=x.planned_total?Math.min(100,x.processed/x.planned_total*100)+'%':'0%';$('#elapsed').textContent='已用时间：'+duration(x.elapsed_seconds);$('#remaining').textContent='预计剩余：'+(x.estimated_remaining_seconds===null?'等待首张图片':duration(x.estimated_remaining_seconds));$('#finish-at').textContent='预计完成：'+finishTime(x.estimated_remaining_seconds);$('#current').textContent=x.current_source||x.fatal_error||(['finished','failed'].includes(x.state)?'任务结束：'+(x.stop_reason||'error'):(x.state==='paused'?'已暂停。':'正在扫描图片目录…'));$('#pause').disabled=!['running','paused'].includes(x.state);$('#pause').textContent=x.state==='paused'?'继续':'暂停';$('#stop').disabled=!['preparing','running','paused'].includes(x.state);if(['finished','failed'].includes(x.state)){$('#downloads').classList.add('show');busy(false);clearInterval(timer);timer=null;if(x.skipped)say('任务结束，已跳过 '+x.skipped+' 个此前成功的图片。')}const rs=x.records||[];const rawRecord=rs.slice().reverse().find(r=>r.raw_model_response);$('#debug-panel').hidden=!x.debug_model_response;$('#debug-output').textContent=rawRecord?rawRecord.raw_model_response:(x.debug_model_response?'等待模型返回原始文本…':'');if(rs.length)$('#rows').innerHTML=rs.slice().reverse().map(r=>'<tr><td data-display="file" title="'+esc(r.source)+'">'+esc(r.source.split(/[\\/]/).pop())+'</td><td data-display="status" class="'+(r.status==='success'?'ok':'bad')+'">'+(r.status==='success'?'完成':'失败')+'</td><td data-display="category">'+esc(r.category)+'</td><td data-display="tags">'+(r.tags||[]).slice(0,5).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</td><td data-display="character">'+esc(r.auto_character||'—')+'</td><td data-display="duration">'+Number(r.elapsed_seconds||0).toFixed(1)+'s</td><td data-display="detail">'+esc(r.error||r.summary)+'</td></tr>').join('');applyDisplaySettings()}
+async function update(){if(!runId)return;try{render(await api('/api/runs/'+runId))}catch(e){say(e.message,true);clearInterval(timer);timer=null;busy(false)}}
+async function act(fn){try{say('');await fn()}catch(e){say(e.message,true)}}
+$('#health').onclick=()=>act(async()=>{const r=await api('/api/service/health',{method:'POST',body:JSON.stringify(data())});say('联通成功：'+(r.model||'未知模型'))});
+$('#count-files').onclick=()=>act(async()=>{const r=await api('/api/folder/inspect',{method:'POST',body:JSON.stringify(folderData(false))});$('#path-info').textContent='路径可读取：'+r.folder+'；共找到 '+r.image_count+' 张支持的图片。'+(r.use_windows_path?'将以 Windows 路径写入报告。':'')});
+$('#check-tags').onclick=()=>act(async()=>{const r=await api('/api/folder/inspect',{method:'POST',body:JSON.stringify(folderData(true))});$('#path-info').textContent='路径可读取：'+r.folder+'；共 '+r.image_count+' 张，已有成功 Tag '+r.completed_count+' 张，待处理 '+r.pending_count+' 张。'+(r.use_windows_path?'已按 Windows 路径比对。':'')+'结果目录：'+r.output_folder;});
+$('#models').onclick=()=>act(refreshModels);
+$('#switch').onclick=()=>act(async()=>{if(!modelListReady||!$('#preset').value)throw Error('请先读取模型列表并选择模型。');if(!confirm('模型切换期间不能识别图片。确认继续？'))return;const preset=$('#preset').value;busy(true);try{const r=await api('/api/service/model',{method:'POST',body:JSON.stringify({...serviceData(),preset})});$('#model-info').textContent='已切换：'+(r.model||'')}finally{busy(false);await refreshModels()}});
+$('#restart-console').onclick=()=>act(async()=>{if(!confirm('确认重启 8788 控制台？若有任务正在处理，当前那张图片会中断；已写入报告的结果会保留。'))return;busy(true);const r=await api('/api/console/restart',{method:'POST',body:JSON.stringify({force:true})});say(r.message+'，页面将自动刷新。');setTimeout(()=>location.reload(),2500)});
+$('#start').onclick=()=>act(async()=>{let x=data();if(!x.folder||!x.service_url||!x.api_key)throw Error('请填写图片文件夹路径、Mac 服务地址和 API key。');busy(true);const r=await api('/api/runs',{method:'POST',body:JSON.stringify(x)});runId=r.id;render(r);timer=setInterval(update,1000);say('任务已创建，正在检查服务并扫描图片…')});
+$('#pause').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/'+($('#pause').textContent==='继续'?'resume':'pause'),{method:'POST'});update()});
+$('#stop').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/stop',{method:'POST'});say('已请求停止：当前图片完成后结束。');update()});
+document.querySelectorAll('[data-report]').forEach(b=>b.onclick=()=>act(async()=>{const kind=b.dataset.report,r=await fetch('/api/runs/'+runId+'/report/'+kind,{headers:headers()});if(!r.ok){const d=await r.json().catch(()=>({}));throw Error(d.detail||'报告尚未生成')}const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download={csv:'image_tags.csv',jsonl:'image_tags.jsonl',summary:'run_summary.json'}[kind];a.click();URL.revokeObjectURL(a.href)}));
+if($('#url').value.trim()&&$('#key').value.trim())act(refreshModels);
+</script></body></html>
