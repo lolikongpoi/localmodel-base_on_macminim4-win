@@ -2,6 +2,7 @@
 
 import asyncio
 import gc
+import io
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +39,8 @@ API_KEY = os.environ.get("TAGGER_API_KEY", "")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "100"))
 MAX_IMAGE_EDGE = int(os.environ.get("MAX_IMAGE_EDGE", "2048"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "350"))
+MAX_BATCH_SIZE = 4
+MAX_BATCH_PIXELS = 4_000_000
 # Images at or below this size remain in RAM after preprocessing and are handed
 # straight to MLX-VLM as PIL images. Larger images use the former temporary
 # JPEG path so an unusually large upload cannot pressure unified memory.
@@ -50,6 +54,9 @@ MultiPartParser.spool_max_size = MULTIPART_MEMORY_MB * 1024 * 1024
 # duplicate, memory-heavy vision encodes when two Windows clients upload together.
 inference_lock = asyncio.Lock()
 runtime: dict[str, Any] = {}
+# Console ownership is independent of the weights and tokenizer in runtime.
+batch_console_process: subprocess.Popen | None = None
+batch_console_lock = threading.RLock()
 WEB_PAGE = Path(__file__).with_name("web") / "index.html"
 REMOTE_WEB_DIR = Path(os.environ.get("REMOTE_WEB_DIR", str(Path(__file__).resolve().parent.parent / "remote_web")))
 REMOTE_WEB_PORT = int(os.environ.get("REMOTE_WEB_PORT", "8788"))
@@ -129,66 +136,66 @@ def _batch_console_online() -> bool:
 
 
 def _batch_console_status() -> dict[str, Any]:
-    process = runtime.get("batch_console_process")
-    managed = bool(process and process.poll() is None)
-    if process and not managed:
-        runtime.pop("batch_console_process", None)
-    return {
-        "status": "running" if _batch_console_online() else "stopped",
-        "port": REMOTE_WEB_PORT,
-        "managed_by_tagger": managed,
-    }
+    global batch_console_process
+    with batch_console_lock:
+        if batch_console_process is not None and batch_console_process.poll() is not None:
+            batch_console_process = None
+        return {
+            "status": "running" if _batch_console_online() else "stopped",
+            "port": REMOTE_WEB_PORT,
+            "managed_by_tagger": batch_console_process is not None,
+        }
 
 
 def _start_batch_console() -> dict[str, Any]:
-    status = _batch_console_status()
-    if status["status"] == "running":
-        return status
-    script = REMOTE_WEB_DIR / "start.sh"
-    if not script.is_file():
-        raise HTTPException(503, f"批量控制台启动脚本不存在：{script}")
-    if not (REMOTE_WEB_DIR / ".venv" / "bin" / "python").is_file():
-        raise HTTPException(503, "批量控制台尚未安装运行环境")
-    log_path = Path(tempfile.gettempdir()) / f"remote-web-{REMOTE_WEB_PORT}.log"
-    try:
-        log_handle = log_path.open("a", encoding="utf-8")
-        process = subprocess.Popen(
-            [str(script)],
-            cwd=REMOTE_WEB_DIR,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        runtime["batch_console_process"] = process
-        runtime["batch_console_log"] = log_handle
-    except OSError as exc:
-        raise HTTPException(502, f"无法启动批量控制台：{exc}") from exc
-    for _ in range(30):
-        if _batch_console_online():
-            return _batch_console_status()
-        if process.poll() is not None:
-            break
-        time.sleep(0.1)
-    raise HTTPException(502, f"批量控制台未能启动，请查看日志：{log_path}")
+    global batch_console_process
+    with batch_console_lock:
+        status = _batch_console_status()
+        if status["status"] == "running":
+            return status
+        script = REMOTE_WEB_DIR / "start.sh"
+        if not script.is_file():
+            raise HTTPException(503, f"批量控制台启动脚本不存在：{script}")
+        if not (REMOTE_WEB_DIR / ".venv" / "bin" / "python").is_file():
+            raise HTTPException(503, "批量控制台尚未安装运行环境")
+        log_path = Path(tempfile.gettempdir()) / f"remote-web-{REMOTE_WEB_PORT}.log"
+        if batch_console_process is None:
+            try:
+                with log_path.open("a", encoding="utf-8") as log_handle:
+                    batch_console_process = subprocess.Popen(
+                        [str(script)], cwd=REMOTE_WEB_DIR, stdout=log_handle,
+                        stderr=subprocess.STDOUT, start_new_session=True,
+                        env={**os.environ, "REMOTE_WEB_PORT": str(REMOTE_WEB_PORT)},
+                    )
+            except OSError as exc:
+                raise HTTPException(502, f"无法启动批量控制台：{exc}") from exc
+        for _ in range(30):
+            if batch_console_process.poll() is not None:
+                batch_console_process = None
+                break
+            if _batch_console_online():
+                return _batch_console_status()
+            time.sleep(0.1)
+        raise HTTPException(502, f"批量控制台未能启动，请查看日志：{log_path}")
 
 
 def _stop_batch_console() -> dict[str, Any]:
-    process = runtime.get("batch_console_process")
-    if not process or process.poll() is not None:
-        if _batch_console_online():
-            raise HTTPException(409, "批量控制台不是由当前 8787 服务启动，无法安全停止")
+    global batch_console_process
+    with batch_console_lock:
+        status = _batch_console_status()
+        process = batch_console_process
+        if process is None:
+            if status["status"] == "running":
+                raise HTTPException(409, "批量控制台不是由当前 8787 服务启动，无法安全停止")
+            return status
+        process.terminate()
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=3)
+        batch_console_process = None
         return _batch_console_status()
-    process.terminate()
-    try:
-        process.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=3)
-    runtime.pop("batch_console_process", None)
-    log_handle = runtime.pop("batch_console_log", None)
-    if log_handle:
-        log_handle.close()
-    return _batch_console_status()
 
 
 @asynccontextmanager
@@ -227,7 +234,7 @@ def _normalize(result: dict[str, Any]) -> TagResult:
         "document_or_ui", "other",
     }
     category = result.get("category", "other")
-    if category not in categories:
+    if not isinstance(category, str) or category not in categories:
         category = "other"
     tags = result.get("tags", [])
     if not isinstance(tags, list):
@@ -304,9 +311,75 @@ def _infer(image: Image.Image | str, capture_raw_response: bool = False) -> TagR
     return (normalized, raw_response) if capture_raw_response else normalized
 
 
+def _image_batches(items):
+    """Cap the aggregate vision input without changing individual images."""
+    group, pixels = [], 0
+    for index, image in items:
+        area = image.width * image.height
+        if group and (len(group) == MAX_BATCH_SIZE or pixels + area > MAX_BATCH_PIXELS):
+            yield group
+            group, pixels = [], 0
+        group.append((index, image))
+        pixels += area
+    if group:
+        yield group
+
+
+def _batch_result(text: str, capture_raw: bool) -> dict[str, Any]:
+    try:
+        item = {"status": "success", "result": _normalize(_extract_json(text)).model_dump()}
+    except ValueError as exc:
+        item = {"status": "error", "status_code": 502, "detail": f"model returned an invalid tag result: {exc}"}
+    if capture_raw:
+        item["raw_model_response"] = text[:10000]
+    return item
+
+
+def _infer_batch(items, capture_raw: bool) -> dict[int, dict[str, Any]]:
+    results = {}
+    for group in _image_batches(items):
+        start = time.monotonic()
+        if len(group) > 1:
+            try:
+                from mlx_vlm import batch_generate
+
+                output = batch_generate(
+                    runtime["model"], runtime["processor"],
+                    images=[image for _, image in group], prompts=[PROMPT] * len(group),
+                    max_tokens=MAX_OUTPUT_TOKENS, group_by_shape=False,
+                )
+                if len(output.texts) != len(group) or not all(isinstance(t, str) for t in output.texts):
+                    raise ValueError("unexpected batch response")
+            except Exception:
+                logger.exception("Batched inference failed; retrying images individually")
+            else:
+                elapsed = (time.monotonic() - start) / len(group)
+                for (index, _), text in zip(group, output.texts):
+                    results[index] = {**_batch_result(text, capture_raw), "elapsed_seconds": elapsed, "inference_batch_size": len(group)}
+                continue
+        for index, image in group:
+            start = time.monotonic()
+            try:
+                response = _infer(image, capture_raw)
+                if capture_raw:
+                    result, raw = response
+                    item = {"status": "success", "result": result.model_dump(), "raw_model_response": raw[:10000]}
+                else:
+                    item = {"status": "success", "result": response.model_dump()}
+            except ValueError as exc:
+                item = {"status": "error", "status_code": 502, "detail": f"model returned an invalid tag result: {exc}"}
+                if isinstance(exc, ModelResponseError):
+                    item["raw_model_response"] = exc.raw_response[:10000]
+            except Exception as exc:
+                logger.exception("Image tagging failed within batch")
+                item = {"status": "error", "status_code": 502, "detail": f"model inference failed: {type(exc).__name__}"}
+            results[index] = {**item, "elapsed_seconds": time.monotonic() - start, "inference_batch_size": 1}
+    return results
+
+
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok", "model": runtime.get("model_id", INITIAL_MODEL_ID)}
+def healthz() -> dict[str, Any]:
+    return {"status": "ok", "model": runtime.get("model_id", INITIAL_MODEL_ID), "max_batch_size": MAX_BATCH_SIZE}
 
 
 @app.get("/", include_in_schema=False)
@@ -374,7 +447,7 @@ async def tag_image(
         # Decode and normalize the image in RAM. MLX-VLM accepts PIL images,
         # avoiding an SSD write for ordinary uploads. The disk fallback keeps
         # pathological 2K+ images from raising unified-memory pressure.
-        with Image.open(__import__("io").BytesIO(payload)) as source:
+        with Image.open(io.BytesIO(payload)) as source:
             source = ImageOps.exif_transpose(source).convert("RGB")
             source.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
             async with inference_lock:
@@ -411,3 +484,40 @@ async def tag_image(
     finally:
         if temp_path:
             Path(temp_path).unlink(missing_ok=True)
+
+
+@app.post("/v1/tag/batch", dependencies=[Depends(_require_api_key)])
+async def tag_batch(
+    images: list[UploadFile] = File(...),
+    x_debug_raw_model: str | None = Header(default=None),
+) -> dict[str, Any]:
+    if not 1 <= len(images) <= MAX_BATCH_SIZE:
+        raise HTTPException(422, f"send 1 to {MAX_BATCH_SIZE} images per batch")
+    capture_raw = (x_debug_raw_model or "").strip().lower() in {"1", "true", "yes"}
+    items, results = [], {}
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    try:
+        for index, upload in enumerate(images):
+            try:
+                if not (upload.content_type or "").startswith("image/"):
+                    raise HTTPException(415, "upload an image file")
+                payload = await upload.read(limit + 1)
+                if not payload:
+                    raise HTTPException(400, "empty upload")
+                if len(payload) > limit:
+                    raise HTTPException(413, f"image exceeds {MAX_UPLOAD_MB} MB")
+                with Image.open(io.BytesIO(payload)) as source:
+                    image = ImageOps.exif_transpose(source).convert("RGB")
+                    image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+                    items.append((index, image))
+            except HTTPException as exc:
+                results[index] = {"status": "error", "status_code": exc.status_code, "detail": exc.detail}
+            except (OSError, ValueError, Image.DecompressionBombError):
+                results[index] = {"status": "error", "status_code": 415, "detail": "the upload is not a readable image"}
+        if items:
+            async with inference_lock:
+                results.update(await asyncio.to_thread(_infer_batch, items, capture_raw))
+        return {"results": [{"index": index, **results[index]} for index in range(len(images))]}
+    finally:
+        for _, image in items:
+            image.close()

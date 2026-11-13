@@ -22,12 +22,14 @@
       <label>Mac API key</label><input id="key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
       <label>远程访问口令（如有）</label><input id="access" type="password" autocomplete="off">
       <div class="twocol"><div><label>最多图片数</label><input id="count" placeholder="全部"></div><div><label>最长时间（分钟）</label><input id="minutes" placeholder="不限"></div></div>
+      <label for="batch-size">每批图片数</label><select id="batch-size"><option value="1">1 张 · 逐张模式</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select>
+      <p class="hint">多图模式按图片分别记录结果，单张耗时显示该批的平均值；大图会自动拆成小批。</p>
       <div class="checks"><label><input id="recursive" type="checkbox" checked>递归扫描子目录</label><label><input id="skip" type="checkbox" checked>跳过已有成功记录</label></div>
       <div class="actions"><button id="health" class="secondary">检查联通</button><button id="models" class="secondary">读取模型</button></div>
       <div class="twocol"><div><label>模型预设</label><select id="preset" disabled><option value="">请先读取模型列表</option></select></div><div style="display:flex;align-items:end"><button id="switch" class="secondary wide" disabled>切换模型</button></div></div>
       <p id="model-info" class="hint">未读取模型状态。</p><button id="start" class="wide">开始批量识别</button>
       <button id="restart-console" class="secondary wide" type="button">重启 8788 控制台服务</button>
-      <p class="hint">重启会重新加载网页与后台代码；若任务正在处理，当前那张图片会中断，但已写入报告的结果会保留。</p>
+      <p class="hint">刷新网页会接回正在运行的任务。重启后台会结束任务，已写入的报告会保留。</p>
       <div id="notice" class="notice"></div>
     </section>
     <section class="card"><h2 id="state">任务进度</h2>
@@ -44,24 +46,26 @@
         <label class="display-item"><input type="checkbox" data-toggle="detail" checked>摘要 / 错误<input type="range" data-width="detail" min="120" max="480" value="250"><output data-width-label="detail">250</output></label>
       </div></details>
       <div id="current" class="current">尚未开始任务。</div>
-      <div class="actions"><button id="pause" class="secondary" disabled>暂停</button><button id="stop" class="danger" disabled>停止（当前图片完成后）</button></div>
+      <div class="actions"><button id="pause" class="secondary" disabled>暂停</button><button id="stop" class="danger" disabled>停止</button></div>
+      <button id="restore-run" class="secondary wide">查找进行中的任务</button>
       <div id="downloads" class="downloads"><button data-report="csv" class="secondary">下载 CSV</button><button data-report="jsonl" class="secondary">下载 JSONL</button><button data-report="summary" class="secondary">下载摘要</button></div>
       <details id="debug-panel" class="debug-panel" hidden><summary>模型原始返回（最新一张，含解析错误）</summary><pre id="debug-output"></pre></details>
       <div style="overflow:auto"><table><thead><tr><th data-display="file">文件</th><th data-display="status">状态</th><th data-display="category">类别</th><th data-display="tags">标签</th><th data-display="character">人物</th><th data-display="duration">耗时</th><th data-display="detail">摘要 / 错误</th></tr></thead><tbody id="rows"><tr><td colspan="7" style="text-align:center;color:#a3acbf">结果会显示在这里。</td></tr></tbody></table></div>
     </section>
-  </div><footer>API key 和访问口令不写入报告；暂停与停止会在当前图片完成后生效。</footer>
+  </div><footer>刷新网页可同步后台当前进度；暂停与停止在当前批次完成后生效。</footer>
 </main>
 <script>
-const $=s=>document.querySelector(s),ids=['folder','output','windows-folder','use-windows-path','debug-raw','url','key','access','count','minutes','recursive','skip'];let runId=null,timer=null,controlsBusy=false,modelListRequest=0,modelListReady=false;
+const $=s=>document.querySelector(s),ids=['folder','output','windows-folder','use-windows-path','debug-raw','url','key','access','count','minutes','recursive','skip','batch-size'];let runId=null,runState=null,timer=null,polling=false,controlsBusy=false,modelListRequest=0,modelListReady=false;
+const activeStates=['preparing','running','paused'];
 for(const id of ids){const n=$('#'+id),v=sessionStorage.getItem('tagger-'+id);if(v!==null)n.type==='checkbox'?n.checked=v==='1':n.value=v;n.addEventListener('input',()=>sessionStorage.setItem('tagger-'+id,n.type==='checkbox'?(n.checked?'1':'0'):n.value))}
 function headers(){const t=$('#access').value.trim();return {'Content-Type':'application/json',...(t?{'X-Remote-Access-Token':t}:{})}}
 function number(v,int){v=v.trim();if(!v)return null;const n=int?parseInt(v,10):parseFloat(v);if(!Number.isFinite(n)||n<=0)throw Error(int?'最多图片数必须是正整数':'最长时间必须是正数');return n}
-function data(extra={}){return {folder:$('#folder').value.trim(),output_folder:$('#output').value.trim()||null,windows_folder:$('#windows-folder').value.trim()||null,use_windows_path:$('#use-windows-path').checked,debug_model_response:$('#debug-raw').checked,service_url:$('#url').value.trim(),api_key:$('#key').value.trim(),recursive:$('#recursive').checked,skip_completed:$('#skip').checked,max_images:number($('#count').value,true),max_minutes:number($('#minutes').value,false),...extra}}
+function data(extra={}){return {folder:$('#folder').value.trim(),output_folder:$('#output').value.trim()||null,windows_folder:$('#windows-folder').value.trim()||null,use_windows_path:$('#use-windows-path').checked,debug_model_response:$('#debug-raw').checked,service_url:$('#url').value.trim(),api_key:$('#key').value.trim(),recursive:$('#recursive').checked,skip_completed:$('#skip').checked,batch_size:Number($('#batch-size').value)||1,max_images:number($('#count').value,true),max_minutes:number($('#minutes').value,false),...extra}}
 function folderData(checkCompleted){return {folder:$('#folder').value.trim(),output_folder:$('#output').value.trim()||null,windows_folder:$('#windows-folder').value.trim()||null,use_windows_path:$('#use-windows-path').checked,recursive:$('#recursive').checked,check_completed:checkCompleted}}
-async function api(path,opt={}){const r=await fetch(path,{...opt,headers:{...headers(),...(opt.headers||{})}}),d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.detail||'请求失败（HTTP '+r.status+'）');return d}
+async function api(path,opt={}){const r=await fetch(path,{cache:'no-store',...opt,headers:{...headers(),...(opt.headers||{})}}),d=await r.json().catch(()=>({}));if(!r.ok)throw Object.assign(Error(d.detail||'请求失败（HTTP '+r.status+'）'),{status:r.status});return d}
 function say(s,bad=false){const n=$('#notice');n.textContent=s;n.classList.toggle('show',!!s);n.style.background=bad?'#ff92921e':'#70dca81e';n.style.color=bad?'#ffb0b7':'#a6f1cf'}
 function updateModelControls(){$('#preset').disabled=controlsBusy||!modelListReady;$('#switch').disabled=controlsBusy||!modelListReady||!$('#preset').value}
-function busy(v){controlsBusy=v;['start','health','models','restart-console'].forEach(id=>$('#'+id).disabled=v);updateModelControls()}
+function busy(v){controlsBusy=v;['start','health','models','restart-console','batch-size'].forEach(id=>$('#'+id).disabled=v);updateModelControls()}
 function resetModelOptions(message='请先读取模型列表'){modelListRequest++;modelListReady=false;$('#preset').replaceChildren(new Option(message,''));updateModelControls()}
 function serviceData(){return {service_url:$('#url').value.trim(),api_key:$('#key').value.trim()}}
 async function refreshModels(){
@@ -93,18 +97,71 @@ document.querySelectorAll('[data-width]').forEach(node=>node.addEventListener('i
 applyDisplaySettings();
 function duration(value){if(value===null||value===undefined)return '计算中';const n=Math.max(0,Math.round(Number(value)||0)),d=Math.floor(n/86400),h=Math.floor(n%86400/3600),m=Math.floor(n%3600/60),s=n%60;return d?d+'天'+h+'小时'+m+'分':h?h+'小时'+m+'分':m?m+'分'+s+'秒':s+'秒'}
 function finishTime(seconds){if(seconds===null||seconds===undefined)return '等待首张图片';return new Date(Date.now()+Number(seconds)*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false})}
-function render(x){const state={preparing:'正在准备',running:'正在识别',paused:'任务已暂停',finished:'任务已结束',failed:'任务失败'}[x.state]||x.state;$('#state').textContent='任务进度 · '+state;$('#done').textContent=x.processed;$('#total').textContent=x.planned_total||'–';$('#success').textContent=x.successful;$('#failed').textContent=x.failed;$('#bar').style.width=x.planned_total?Math.min(100,x.processed/x.planned_total*100)+'%':'0%';$('#elapsed').textContent='已用时间：'+duration(x.elapsed_seconds);$('#remaining').textContent='预计剩余：'+(x.estimated_remaining_seconds===null?'等待首张图片':duration(x.estimated_remaining_seconds));$('#finish-at').textContent='预计完成：'+finishTime(x.estimated_remaining_seconds);$('#current').textContent=x.current_source||x.fatal_error||(['finished','failed'].includes(x.state)?'任务结束：'+(x.stop_reason||'error'):(x.state==='paused'?'已暂停。':'正在扫描图片目录…'));$('#pause').disabled=!['running','paused'].includes(x.state);$('#pause').textContent=x.state==='paused'?'继续':'暂停';$('#stop').disabled=!['preparing','running','paused'].includes(x.state);if(['finished','failed'].includes(x.state)){$('#downloads').classList.add('show');busy(false);clearInterval(timer);timer=null;if(x.skipped)say('任务结束，已跳过 '+x.skipped+' 个此前成功的图片。')}const rs=x.records||[];const rawRecord=rs.slice().reverse().find(r=>r.raw_model_response);$('#debug-panel').hidden=!x.debug_model_response;$('#debug-output').textContent=rawRecord?rawRecord.raw_model_response:(x.debug_model_response?'等待模型返回原始文本…':'');if(rs.length)$('#rows').innerHTML=rs.slice().reverse().map(r=>'<tr><td data-display="file" title="'+esc(r.source)+'">'+esc(r.source.split(/[\\/]/).pop())+'</td><td data-display="status" class="'+(r.status==='success'?'ok':'bad')+'">'+(r.status==='success'?'完成':'失败')+'</td><td data-display="category">'+esc(r.category)+'</td><td data-display="tags">'+(r.tags||[]).slice(0,5).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</td><td data-display="character">'+esc(r.auto_character||'—')+'</td><td data-display="duration">'+Number(r.elapsed_seconds||0).toFixed(1)+'s</td><td data-display="detail">'+esc(r.error||r.summary)+'</td></tr>').join('');applyDisplaySettings()}
-async function update(){if(!runId)return;try{render(await api('/api/runs/'+runId))}catch(e){say(e.message,true);clearInterval(timer);timer=null;busy(false)}}
+function render(x){
+  runState=x.state;
+  const active=activeStates.includes(runState), terminal=['finished','failed'].includes(runState);
+  const state={preparing:'正在准备',running:'正在识别',paused:'任务已暂停',finished:'任务已结束',failed:'任务失败'}[runState]||runState;
+  const mode=x.batch_size>1?'每批最多 '+x.batch_size+' 张':'逐张模式';
+  $('#state').textContent='任务进度 · '+state+' · '+mode;
+  $('#done').textContent=x.processed;$('#total').textContent=x.planned_total||'–';
+  $('#success').textContent=x.successful;$('#failed').textContent=x.failed;
+  $('#bar').style.width=x.planned_total?Math.min(100,x.processed/x.planned_total*100)+'%':'0%';
+  $('#elapsed').textContent='已用时间：'+duration(x.elapsed_seconds);
+  $('#remaining').textContent='预计剩余：'+(x.estimated_remaining_seconds===null?'等待首批图片':duration(x.estimated_remaining_seconds));
+  $('#finish-at').textContent='预计完成：'+finishTime(x.estimated_remaining_seconds);
+  $('#current').textContent=x.current_source||x.fatal_error||(terminal?'任务结束：'+(x.stop_reason||'error'):runState==='paused'?'已暂停。':'正在扫描图片目录…');
+  $('#pause').disabled=!['running','paused'].includes(runState);$('#pause').textContent=runState==='paused'?'继续':'暂停';
+  $('#stop').disabled=!active;$('#stop').textContent=x.batch_size>1?'停止（当前批次完成后）':'停止（当前图片完成后）';
+  $('#downloads').classList.toggle('show',terminal);
+  busy(active);
+  if(!active&&timer!==null){clearInterval(timer);timer=null}
+  const rs=x.records||[], rawRecord=rs.slice().reverse().find(r=>r.raw_model_response);
+  $('#debug-panel').hidden=!x.debug_model_response;
+  $('#debug-output').textContent=rawRecord?rawRecord.raw_model_response:(x.debug_model_response?'等待模型返回原始文本…':'');
+  $('#rows').innerHTML=rs.length?rs.slice().reverse().map(r=>'<tr><td data-display="file" title="'+esc(r.source).replace(/"/g,'&quot;')+'">'+esc(r.source.split(/[\\/]/).pop())+'</td><td data-display="status" class="'+(r.status==='success'?'ok':'bad')+'">'+(r.status==='success'?'完成':'失败')+'</td><td data-display="category">'+esc(r.category)+'</td><td data-display="tags">'+(r.tags||[]).slice(0,5).map(t=>'<span class="tag">'+esc(t)+'</span>').join('')+'</td><td data-display="character">'+esc(r.auto_character||'—')+'</td><td data-display="duration">'+Number(r.elapsed_seconds||0).toFixed(1)+'s</td><td data-display="detail">'+esc(r.error||r.summary)+'</td></tr>').join(''):'<tr><td colspan="7">结果会显示在这里。</td></tr>';
+  applyDisplaySettings();
+}
+function attachRun(x){
+  runId=x.id;sessionStorage.setItem('tagger-run-id',runId);render(x);
+  if(activeStates.includes(x.state)&&timer===null)timer=setInterval(update,1000);
+}
+async function update(){
+  if(!runId||polling)return;
+  const id=runId;polling=true;
+  try{const x=await api('/api/runs/'+id);if(runId===id)attachRun(x)}
+  catch(e){if(runId===id){
+    if(e.status===404){
+      clearInterval(timer);timer=null;runId=runState=null;sessionStorage.removeItem('tagger-run-id');
+      $('#pause').disabled=$('#stop').disabled=true;$('#downloads').classList.remove('show');busy(false);
+      $('#state').textContent='任务进度 · 后台已结束原任务';
+    }
+    say('暂时无法读取任务：'+e.message,true);
+  }}
+  finally{polling=false}
+}
+async function restoreRun(showEmpty=false){
+  const found=await api('/api/runs/active');
+  if(found.run){attachRun(found.run);return}
+  const saved=sessionStorage.getItem('tagger-run-id');
+  if(saved&&/^[0-9a-f]{32}$/.test(saved)){
+    try{attachRun(await api('/api/runs/'+saved));return}
+    catch(e){if(e.status!==404)throw e;sessionStorage.removeItem('tagger-run-id')}
+  }
+  if(showEmpty)say('没有可接回的任务。');
+}
 async function act(fn){try{say('');await fn()}catch(e){say(e.message,true)}}
 $('#health').onclick=()=>act(async()=>{const r=await api('/api/service/health',{method:'POST',body:JSON.stringify(data())});say('联通成功：'+(r.model||'未知模型'))});
 $('#count-files').onclick=()=>act(async()=>{const r=await api('/api/folder/inspect',{method:'POST',body:JSON.stringify(folderData(false))});$('#path-info').textContent='路径可读取：'+r.folder+'；共找到 '+r.image_count+' 张支持的图片。'+(r.use_windows_path?'将以 Windows 路径写入报告。':'')});
 $('#check-tags').onclick=()=>act(async()=>{const r=await api('/api/folder/inspect',{method:'POST',body:JSON.stringify(folderData(true))});$('#path-info').textContent='路径可读取：'+r.folder+'；共 '+r.image_count+' 张，已有成功 Tag '+r.completed_count+' 张，待处理 '+r.pending_count+' 张。'+(r.use_windows_path?'已按 Windows 路径比对。':'')+'结果目录：'+r.output_folder;});
 $('#models').onclick=()=>act(refreshModels);
 $('#switch').onclick=()=>act(async()=>{if(!modelListReady||!$('#preset').value)throw Error('请先读取模型列表并选择模型。');if(!confirm('模型切换期间不能识别图片。确认继续？'))return;const preset=$('#preset').value;busy(true);try{const r=await api('/api/service/model',{method:'POST',body:JSON.stringify({...serviceData(),preset})});$('#model-info').textContent='已切换：'+(r.model||'')}finally{busy(false);await refreshModels()}});
-$('#restart-console').onclick=()=>act(async()=>{if(!confirm('确认重启 8788 控制台？若有任务正在处理，当前那张图片会中断；已写入报告的结果会保留。'))return;busy(true);const r=await api('/api/console/restart',{method:'POST',body:JSON.stringify({force:true})});say(r.message+'，页面将自动刷新。');setTimeout(()=>location.reload(),2500)});
-$('#start').onclick=()=>act(async()=>{let x=data();if(!x.folder||!x.service_url||!x.api_key)throw Error('请填写图片文件夹路径、Mac 服务地址和 API key。');busy(true);const r=await api('/api/runs',{method:'POST',body:JSON.stringify(x)});runId=r.id;render(r);timer=setInterval(update,1000);say('任务已创建，正在检查服务并扫描图片…')});
-$('#pause').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/'+($('#pause').textContent==='继续'?'resume':'pause'),{method:'POST'});update()});
-$('#stop').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/stop',{method:'POST'});say('已请求停止：当前图片完成后结束。');update()});
+$('#restart-console').onclick=()=>act(async()=>{if(!confirm('确认重启 8788 控制台？已写入报告的结果会保留。'))return;busy(true);try{const r=await api('/api/console/restart',{method:'POST',body:JSON.stringify({force:false})});say(r.message+'，页面将自动刷新。');setTimeout(()=>location.reload(),2500)}catch(e){busy(activeStates.includes(runState));throw e}});
+$('#start').onclick=()=>act(async()=>{const x=data();if(!x.folder||!x.service_url||!x.api_key)throw Error('请填写图片文件夹路径、Mac 服务地址和 API key。');busy(true);try{attachRun(await api('/api/runs',{method:'POST',body:JSON.stringify(x)}));say('任务已创建，正在检查服务并扫描图片…')}catch(e){busy(activeStates.includes(runState));if(e.status===409)await restoreRun();throw e}});
+$('#pause').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/'+(runState==='paused'?'resume':'pause'),{method:'POST'});await update()});
+$('#stop').onclick=()=>act(async()=>{await api('/api/runs/'+runId+'/stop',{method:'POST'});say('已请求停止。');await update()});
+$('#restore-run').onclick=()=>act(()=>restoreRun(true));
+$('#access').addEventListener('change',()=>act(()=>restoreRun()));
 document.querySelectorAll('[data-report]').forEach(b=>b.onclick=()=>act(async()=>{const kind=b.dataset.report,r=await fetch('/api/runs/'+runId+'/report/'+kind,{headers:headers()});if(!r.ok){const d=await r.json().catch(()=>({}));throw Error(d.detail||'报告尚未生成')}const blob=await r.blob(),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download={csv:'image_tags.csv',jsonl:'image_tags.jsonl',summary:'run_summary.json'}[kind];a.click();URL.revokeObjectURL(a.href)}));
+restoreRun().catch(e=>{if(e.status!==404)say(e.message,true)});
 if($('#url').value.trim()&&$('#key').value.trim())act(refreshModels);
 </script></body></html>

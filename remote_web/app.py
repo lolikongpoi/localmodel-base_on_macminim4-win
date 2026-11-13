@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 APP_DIR = Path(__file__).resolve().parent
 WEB_PAGE = APP_DIR / "web" / "index.html"
 REPORT_ROOT = Path(os.environ.get("REMOTE_WEB_REPORT_DIR", str(APP_DIR / "reports"))).resolve()
+ACTIVE_STATES = {"preparing", "running", "paused"}
 MAX_UPLOAD_BYTES = int(os.environ.get("REMOTE_WEB_MAX_UPLOAD_MB", "100")) * 1024 * 1024
 ACCESS_TOKEN = os.environ.get("REMOTE_WEB_ACCESS_TOKEN", "")
 ALLOWED_HOSTS = {v.strip().lower() for v in os.environ.get("TAGGER_ALLOWED_HOSTS", "").split(",") if v.strip()}
@@ -55,6 +56,7 @@ class RunRequest(ServiceRequest):
     max_images: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     max_minutes: Optional[float] = Field(default=None, gt=0, le=10080)
     skip_completed: bool = True
+    batch_size: int = Field(default=1, ge=1, le=4)
 
 
 class FolderCheckRequest(BaseModel):
@@ -101,6 +103,7 @@ class Run:
     skip_completed: bool
     debug_model_response: bool
     directory: Path
+    batch_size: int = 1
     records: list[Record] = field(default_factory=list)
     planned_total: int = 0
     skipped: int = 0
@@ -110,6 +113,7 @@ class Run:
     fatal_error: str = ""
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
+    finished_at: Optional[float] = None
     paused_at: Optional[float] = None
     paused_seconds: float = 0.0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -318,6 +322,8 @@ def append_record(run: Run, record: Record) -> None:
     run.records.append(record)
 
 
+
+
 def tag_file(run: Run, path: Path) -> Record:
     started = time.monotonic()
     source = report_source(run.folder, run.windows_folder, run.use_windows_path, path)
@@ -344,10 +350,55 @@ def tag_file(run: Run, path: Path) -> Record:
         return Record(source, "error", round(time.monotonic() - started, 3), error="读取或发送图片时出错", details=f"{type(exc).__name__}: {exc}"[:1000])
 
 
+def tag_batch_files(run: Run, paths: list[Path]) -> list[Record]:
+    started = time.monotonic()
+    boundary = f"----RemoteMacTag{uuid.uuid4().hex}"
+    records, pending, parts = {}, [], []
+    for index, path in enumerate(paths):
+        source = report_source(run.folder, run.windows_folder, run.use_windows_path, path)
+        try:
+            with path.open("rb") as handle:
+                payload = handle.read(MAX_UPLOAD_BYTES + 1)
+            if len(payload) > MAX_UPLOAD_BYTES:
+                raise ValueError(f"图片超过 {MAX_UPLOAD_BYTES // 1024 // 1024} MB 限制")
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            name = f"image-{index}{path.suffix.lower()}"
+            parts.extend([
+                (f'--{boundary}\r\nContent-Disposition: form-data; name="images"; filename="{name}"\r\nContent-Type: {mime}\r\n\r\n').encode(),
+                payload, b"\r\n",
+            ])
+            pending.append((index, source))
+        except (OSError, ValueError) as exc:
+            records[index] = Record(source, "error", 0, error=f"读取图片失败：{exc}")
+    if pending:
+        parts.append(f"--{boundary}--\r\n".encode())
+        response = mac_request(
+            run.service_url, run.api_key, "POST", "/v1/tag/batch", b"".join(parts),
+            f"multipart/form-data; boundary={boundary}", timeout=180 * len(pending),
+            extra_headers={"X-Debug-Raw-Model": "1"} if run.debug_model_response else None,
+        )
+        results = response.get("results")
+        if not isinstance(results, list) or len(results) != len(pending) or any(
+            not isinstance(item, dict) or item.get("index") != i or item.get("status") not in {"success", "error"}
+            or (item.get("status") == "success" and not isinstance(item.get("result"), dict))
+            for i, item in enumerate(results)
+        ):
+            raise ValueError("Mac 服务的批次结果数量或顺序异常")
+        elapsed = (time.monotonic() - started) / len(pending)
+        for (index, source), item in zip(pending, results):
+            raw = str(item.get("raw_model_response", ""))[:10000] if run.debug_model_response else ""
+            if item["status"] == "success":
+                records[index] = record_from_response(source, {**item["result"], "raw_model_response": raw}, elapsed)
+            else:
+                records[index] = Record(source, "error", round(elapsed, 3), error=str(item.get("detail", "")),
+                                        details=f"HTTP {item.get('status_code', 502)}", raw_model_response=raw)
+    return [records[index] for index in range(len(paths))]
+
+
 def active_elapsed(run: Run, now: Optional[float] = None) -> float:
     if run.started_at is None:
         return 0.0
-    current = time.monotonic() if now is None else now
+    current = run.finished_at if run.finished_at is not None else (time.monotonic() if now is None else now)
     active_pause = current - run.paused_at if run.paused_at is not None else 0.0
     return max(0.0, current - run.started_at - run.paused_seconds - active_pause)
 
@@ -355,19 +406,24 @@ def active_elapsed(run: Run, now: Optional[float] = None) -> float:
 def finish(run: Run, reason: str) -> None:
     with run.lock:
         if run.state in {"finished", "failed"}: return
+        run.finished_at = time.monotonic()
         if run.paused_at is not None:
-            run.paused_seconds += time.monotonic() - run.paused_at
+            run.paused_seconds += run.finished_at - run.paused_at
             run.paused_at = None
         run.state = "failed" if reason == "error" else "finished"
         run.stop_reason, run.current_source = reason, ""
         summary = {"source_folder": str(run.folder), "windows_folder": run.windows_folder, "use_windows_path": run.use_windows_path, "service_url": run.service_url, "planned_total": run.planned_total, "skipped_completed": run.skipped, "processed": len(run.records), "successful": sum(x.status == "success" for x in run.records), "failed": sum(x.status != "success" for x in run.records), "stop_reason": reason, "total_elapsed_seconds": round(active_elapsed(run), 3), "csv": "image_tags.csv", "jsonl": "image_tags.jsonl"}
+        summary["batch_size"] = run.batch_size
         (run.directory / "run_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def worker(run: Run) -> None:
     try:
-        if mac_request(run.service_url, run.api_key, "GET", "/healthz", timeout=15, needs_key=False).get("status") != "ok":
+        health = mac_request(run.service_url, run.api_key, "GET", "/healthz", timeout=15, needs_key=False)
+        if health.get("status") != "ok":
             raise RuntimeError("Mac 服务健康检查未通过")
+        if run.batch_size > int(health.get("max_batch_size", 1)):
+            raise RuntimeError("8787 尚未加载多图批推理，请更新并重启 8787，或选择逐张模式")
         paths = images(run.folder, run.recursive)
         if run.skip_completed:
             done = previous_successes(run.directory.parent)
@@ -378,7 +434,7 @@ def worker(run: Run) -> None:
             run.planned_total, run.state = len(paths), "running"
             run.started_at = time.monotonic()
         deadline = None if run.max_minutes is None else time.monotonic() + run.max_minutes * 60
-        for path in paths:
+        for index in range(0, len(paths), run.batch_size):
             if run.stop.is_set(): finish(run, "user_stop"); return
             while not run.resume.is_set():
                 with run.lock:
@@ -393,11 +449,16 @@ def worker(run: Run) -> None:
                     run.paused_at = None
                 if deadline is not None: deadline += pause_duration
             if deadline is not None and time.monotonic() >= deadline: finish(run, "time_limit"); return
+            if run.stop.is_set(): finish(run, "user_stop"); return
+            chunk = paths[index:index + run.batch_size]
             with run.lock:
-                run.state, run.current_source = "running", report_source(run.folder, run.windows_folder, run.use_windows_path, path)
-            item = tag_file(run, path)
-            with run.lock: append_record(run, item)
-        finish(run, "completed")
+                run.state = "running"
+                run.current_source = "、".join(report_source(run.folder, run.windows_folder, run.use_windows_path, p) for p in chunk)
+            records = [tag_file(run, chunk[0])] if len(chunk) == 1 else tag_batch_files(run, chunk)
+            with run.lock:
+                for record in records:
+                    append_record(run, record)
+        finish(run, "user_stop" if run.stop.is_set() else "completed")
     except Exception as exc:
         with run.lock: run.fatal_error = f"{type(exc).__name__}: {exc}"
         finish(run, "error")
@@ -405,13 +466,13 @@ def worker(run: Run) -> None:
 
 def get_run(run_id: str) -> Run:
     with runs_lock: run = runs.get(run_id)
-    if not run: raise HTTPException(404, "找不到该任务。服务器重启后请新建任务。")
+    if not run: raise HTTPException(404, "找不到该任务；后台重启后旧任务不会继续运行。")
     return run
 
 
 def active_runs() -> list[Run]:
     with runs_lock:
-        return [run for run in runs.values() if run.state in {"preparing", "running", "paused"}]
+        return [run for run in runs.values() if run.state in ACTIVE_STATES]
 
 
 def restart_console_process() -> None:
@@ -437,6 +498,7 @@ def run_data(run: Run, details: bool = False) -> dict[str, Any]:
         remaining = max(0, run.planned_total - processed)
         estimated = None if not processed else round(sum(item.elapsed_seconds for item in run.records) / processed * remaining, 3)
         data: dict[str, Any] = {"id": run.id, "folder": str(run.folder), "report_folder": str(run.directory), "windows_folder": run.windows_folder, "use_windows_path": run.use_windows_path, "debug_model_response": run.debug_model_response, "planned_total": run.planned_total, "skipped": run.skipped, "processed": processed, "successful": sum(x.status == "success" for x in run.records), "failed": sum(x.status != "success" for x in run.records), "elapsed_seconds": round(active_elapsed(run), 3), "estimated_remaining_seconds": estimated, "state": run.state, "current_source": run.current_source, "stop_reason": run.stop_reason, "fatal_error": run.fatal_error, "created_at": datetime.fromtimestamp(run.created_at, timezone.utc).isoformat()}
+        data["batch_size"] = run.batch_size
         if details: data["records"] = [asdict(x) for x in run.records[-200:]]
         return data
 
@@ -522,25 +584,32 @@ def create(payload: RunRequest, _: None = Depends(require_access)) -> dict[str, 
     target_windows_folder = windows_folder_path(payload.windows_folder, payload.use_windows_path)
     run_id = uuid.uuid4().hex
     directory = target_output_folder / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{run_id[:8]}"
-    run = Run(run_id, target_url, payload.api_key.strip(), target_folder, target_windows_folder, payload.use_windows_path, payload.recursive, payload.max_images, payload.max_minutes, payload.skip_completed, payload.debug_model_response, directory)
+    run = Run(run_id, target_url, payload.api_key.strip(), target_folder, target_windows_folder, payload.use_windows_path, payload.recursive, payload.max_images, payload.max_minutes, payload.skip_completed, payload.debug_model_response, directory, batch_size=payload.batch_size)
     with runs_lock:
-        if any(item.state in {"preparing", "running", "paused"} for item in runs.values()):
-            raise HTTPException(409, "已有批处理任务正在运行，请先暂停、停止或等待它完成")
+        if any(item.state in ACTIVE_STATES for item in runs.values()):
+            raise HTTPException(409, "已有批处理任务正在运行，请先停止或等待它完成")
         directory.mkdir(parents=True, exist_ok=False)
         runs[run_id] = run
     threading.Thread(target=worker, args=(run,), daemon=True, name=f"tag-run-{run_id[:8]}").start()
     return run_data(run)
 
 
+@app.get("/api/runs/active")
+def current_run(_: None = Depends(require_access)) -> dict[str, Any]:
+    with runs_lock:
+        current = next((run for run in runs.values() if run.state in ACTIVE_STATES), None)
+    return {"run": run_data(current, True) if current else None}
+
+
 @app.get("/api/runs/{run_id}")
 def status(run_id: str, _: None = Depends(require_access)) -> dict[str, Any]: return run_data(get_run(run_id), True)
-
-
 
 
 @app.post("/api/runs/{run_id}/{action}")
 def control(run_id: str, action: str, _: None = Depends(require_access)) -> dict[str, Any]:
     run = get_run(run_id)
+    if run.state not in ACTIVE_STATES:
+        raise HTTPException(409, "此任务当前未运行")
     if action == "pause": run.resume.clear()
     elif action == "resume": run.resume.set()
     elif action == "stop": run.stop.set(); run.resume.set()

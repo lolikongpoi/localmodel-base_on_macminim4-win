@@ -284,14 +284,18 @@
     modelPreset.addEventListener('change', updateSwitchButton);
     refreshModels.addEventListener('click', () => refreshModel().catch(error => showError(error.message)));
     async function refreshConsoleStatus() {
-      if (!apiKey.value.trim()) return;
-      const response = await fetch('/v1/batch-console/status', { headers: { 'X-API-Key': apiKey.value.trim() } });
+      if (openedAsFile || !apiKey.value.trim()) return;
+      const response = await fetch('/v1/batch-console/status', { cache: 'no-store', headers: { 'X-API-Key': apiKey.value.trim() } });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(data.detail || '无法读取批量控制台状态。');
-      const running = data.status === 'running';
-      consoleState.textContent = running ? '运行中 · 端口 ' + data.port : '未运行 · 端口 ' + data.port;
-      updateConsoleButtons(data.status, data.managed_by_tagger);
+      renderConsoleStatus(data);
       return data;
+    }
+    function renderConsoleStatus(data) {
+      const label = data.status !== 'running' ? '未运行' :
+        data.managed_by_tagger ? '运行中 · 由本页管理' : '运行中 · 独立启动';
+      consoleState.textContent = label + ' · 端口 ' + data.port;
+      updateConsoleButtons(data.status, data.managed_by_tagger);
     }
     submit.addEventListener('click', async () => {
       if (!selectedFile || !apiKey.value.trim()) return;
@@ -320,6 +324,7 @@
         modelSwitchBusy = false;
         loading.classList.remove('visible'); loading.lastChild.textContent = '正在识别，较大图片可能需要一点时间…'; updateButton(); updateSwitchButton();
         refreshModel().catch(error => showError(error.message));
+        refreshConsoleStatus().catch(error => showError(error.message));
       }
     });
     refreshConsole.addEventListener('click', () => refreshConsoleStatus().catch(error => showError(error.message)));
@@ -329,8 +334,7 @@
         const response = await fetch('/v1/batch-console/start', { method: 'POST', headers: { 'X-API-Key': apiKey.value.trim() } });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || '无法启动批量控制台。');
-        consoleState.textContent = '运行中 · 端口 ' + data.port;
-        updateConsoleButtons('running', data.managed_by_tagger);
+        renderConsoleStatus(data);
       } catch (error) { showError('启动失败：' + error.message); updateConsoleButtons('stopped'); }
     });
     stopConsole.addEventListener('click', async () => {
@@ -340,8 +344,7 @@
         const response = await fetch('/v1/batch-console/stop', { method: 'POST', headers: { 'X-API-Key': apiKey.value.trim() } });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.detail || '无法停止批量控制台。');
-        consoleState.textContent = '未运行 · 端口 ' + data.port;
-        updateConsoleButtons('stopped', false);
+        renderConsoleStatus(data);
       } catch (error) { showError('停止失败：' + error.message); refreshConsoleStatus().catch(() => {}); }
     });
     apiKey.addEventListener('change', () => {
@@ -362,6 +365,7 @@
     updateSwitchButton();
     updateConsoleButtons();
     refreshModel().catch(error => showError(error.message));
+    refreshConsoleStatus().catch(error => showError(error.message));
   </script>
 </body>
 </html>

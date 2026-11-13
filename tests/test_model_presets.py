@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,31 @@ spec.loader.exec_module(remote)
 
 
 class ModelCatalogTests(unittest.TestCase):
+    def test_switch_model_keeps_managed_console_stoppable(self):
+        def load(model_id):
+            tagger_api.runtime["model_id"] = model_id
+
+        fake_mlx = SimpleNamespace(core=SimpleNamespace(clear_cache=lambda: None))
+        with patch.dict(sys.modules, {"mlx": fake_mlx, "mlx.core": fake_mlx.core}), \
+                patch.dict(tagger_api.runtime, {"model_id": tagger_api.MODEL_PRESETS["4b"]}, clear=True), \
+                patch.object(tagger_api, "_load_model", side_effect=load), \
+                patch.object(tagger_api, "batch_console_process") as process, \
+                patch.object(tagger_api, "_batch_console_online", side_effect=[True, True, False]):
+            process.poll.return_value = None
+            self.assertEqual(asyncio.run(tagger_api.switch_model(
+                tagger_api.ModelSwitchRequest(preset="3.5-4b")
+            ))["status"], "active")
+            self.assertTrue(tagger_api._batch_console_status()["managed_by_tagger"])
+            self.assertEqual(tagger_api._stop_batch_console()["status"], "stopped")
+            process.terminate.assert_called_once()
+
+    def test_stopping_unmanaged_console_is_refused(self):
+        with patch.object(tagger_api, "batch_console_process", None), \
+                patch.object(tagger_api, "_batch_console_online", return_value=True):
+            with self.assertRaises(tagger_api.HTTPException) as raised:
+                tagger_api._stop_batch_console()
+            self.assertEqual(raised.exception.status_code, 409)
+
     def test_qwen35_candidates_preserve_qwen3_support(self):
         presets = tagger_api.list_models()["presets"]
         self.assertEqual(presets["4b"], "mlx-community/Qwen3-VL-4B-Instruct-4bit")

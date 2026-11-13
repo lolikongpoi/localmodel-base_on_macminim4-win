@@ -40,7 +40,8 @@ function page(file) {
     element.value = match[3].match(/\bvalue="([^"]*)"/)?.[1] || '';
     nodes.set('#' + match[2], element);
   }
-  const storage = {getItem() { return null; }, setItem() {}};
+  const saved = new Map();
+  const storage = {getItem(key) { return saved.get(key) ?? null; }, setItem(key, value) { saved.set(key, String(value)); }, removeItem(key) { saved.delete(key); }};
   const context = vm.createContext({
     Option, sessionStorage: storage, localStorage: storage,
     window: {location: {protocol: 'http:', hostname: 'localhost'}},
@@ -49,7 +50,7 @@ function page(file) {
       querySelectorAll() { return []; }, createElement(tag) { return new Element(tag); },
     },
     fetch: async () => ({ok: true, json: async () => ({})}),
-    setTimeout() {}, clearInterval() {}, confirm() { return true; },
+    setTimeout() {}, setInterval() { return 1; }, clearInterval() {}, confirm() { return true; },
   });
   vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context, {filename: file});
   return {context, nodes};
@@ -94,6 +95,24 @@ async function check(file, isRemote) {
     assert.equal(button.disabled, true);
     vm.runInContext('busy(false)', context);
     assert.equal(button.disabled, false);
+    const live = {
+      id: 'a'.repeat(32), state: 'running', batch_size: 3, processed: 2, planned_total: 10,
+      successful: 2, failed: 0, elapsed_seconds: 10, estimated_remaining_seconds: 40,
+      current_source: 'next.png', records: [],
+    };
+    context.fetch = async url => ({ok: true, json: async () => url === '/api/runs/active' ? {run: live} : live});
+    await vm.runInContext('restoreRun()', context);
+    assert.equal(vm.runInContext('runId', context), live.id);
+    assert.equal(vm.runInContext('sessionStorage.getItem("tagger-run-id")', context), live.id);
+    assert.equal(nodes.get('#done').textContent, 2);
+    assert.match(nodes.get('#state').textContent, /每批最多 3 张/);
+    assert.equal(nodes.get('#start').disabled, true);
+    assert.equal(nodes.get('#pause').disabled, false);
+    context.fetch = async () => ({ok: false, status: 404, json: async () => ({detail: '任务已结束'})});
+    await vm.runInContext('update()', context);
+    assert.equal(vm.runInContext('runId', context), null);
+    assert.equal(nodes.get('#start').disabled, false);
+    assert.equal(nodes.get('#pause').disabled, true);
   }
   console.log(path.basename(path.dirname(path.dirname(file))) + ': dynamic selection, unknown model, empty catalog, stale response OK');
 }
