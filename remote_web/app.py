@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -30,6 +31,8 @@ APP_DIR = Path(__file__).resolve().parent
 WEB_PAGE = APP_DIR / "web" / "index.html"
 REPORT_ROOT = Path(os.environ.get("REMOTE_WEB_REPORT_DIR", str(APP_DIR / "reports"))).resolve()
 ACTIVE_STATES = {"preparing", "running", "paused"}
+MAX_BATCH_SIZE = 6
+logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = int(os.environ.get("REMOTE_WEB_MAX_UPLOAD_MB", "100")) * 1024 * 1024
 ACCESS_TOKEN = os.environ.get("REMOTE_WEB_ACCESS_TOKEN", "")
 ALLOWED_HOSTS = {v.strip().lower() for v in os.environ.get("TAGGER_ALLOWED_HOSTS", "").split(",") if v.strip()}
@@ -56,7 +59,7 @@ class RunRequest(ServiceRequest):
     max_images: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     max_minutes: Optional[float] = Field(default=None, gt=0, le=10080)
     skip_completed: bool = True
-    batch_size: int = Field(default=1, ge=1, le=4)
+    batch_size: int = Field(default=1, ge=1, le=MAX_BATCH_SIZE)
 
 
 class FolderCheckRequest(BaseModel):
@@ -215,6 +218,10 @@ def windows_folder_path(value: Optional[str], enabled: bool) -> Optional[str]:
     return folder
 
 
+class MacConnectionError(HTTPException):
+    """The request could not get an HTTP response from the model service."""
+
+
 def mac_request(url: str, key: str, method: str, endpoint: str, body: Optional[bytes] = None, content_type: Optional[str] = None, timeout: int = 30, needs_key: bool = True, extra_headers: Optional[dict[str, str]] = None) -> dict[str, Any]:
     headers = {"Accept": "application/json"}
     if needs_key:
@@ -240,7 +247,7 @@ def mac_request(url: str, key: str, method: str, endpoint: str, body: Optional[b
         error.raw_model_response = raw_model_response
         raise error from exc
     except (URLError, TimeoutError, OSError) as exc:
-        raise HTTPException(502, "无法连接 Mac 服务。请检查地址、VPN/局域网、防火墙和服务状态。") from exc
+        raise MacConnectionError(502, "无法连接 Mac 服务。请检查地址、VPN/局域网、防火墙和服务状态。") from exc
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -372,18 +379,33 @@ def tag_batch_files(run: Run, paths: list[Path]) -> list[Record]:
             records[index] = Record(source, "error", 0, error=f"读取图片失败：{exc}")
     if pending:
         parts.append(f"--{boundary}--\r\n".encode())
-        response = mac_request(
-            run.service_url, run.api_key, "POST", "/v1/tag/batch", b"".join(parts),
-            f"multipart/form-data; boundary={boundary}", timeout=180 * len(pending),
-            extra_headers={"X-Debug-Raw-Model": "1"} if run.debug_model_response else None,
-        )
-        results = response.get("results")
-        if not isinstance(results, list) or len(results) != len(pending) or any(
-            not isinstance(item, dict) or item.get("index") != i or item.get("status") not in {"success", "error"}
-            or (item.get("status") == "success" and not isinstance(item.get("result"), dict))
-            for i, item in enumerate(results)
-        ):
-            raise ValueError("Mac 服务的批次结果数量或顺序异常")
+        try:
+            response = mac_request(
+                run.service_url, run.api_key, "POST", "/v1/tag/batch", b"".join(parts),
+                f"multipart/form-data; boundary={boundary}", timeout=180 * len(pending),
+                extra_headers={"X-Debug-Raw-Model": "1"} if run.debug_model_response else None,
+            )
+            results = response.get("results")
+            if not isinstance(results, list) or len(results) != len(pending) or any(
+                not isinstance(item, dict) or item.get("index") != i or item.get("status") not in ("success", "error")
+                or (item.get("status") == "success" and not isinstance(item.get("result"), dict))
+                for i, item in enumerate(results)
+            ):
+                raise HTTPException(502, "Mac 服务的批次结果数量或顺序异常")
+        except MacConnectionError:
+            raise  # A disconnected server is not a bad image.
+        except HTTPException as exc:
+            if not (500 <= exc.status_code < 600 or exc.status_code in {413, 415, 422}):
+                raise  # Preserve real authentication or configuration errors.
+            logger.warning("Batch of %d images failed (HTTP %d); retrying individually",
+                           len(pending), exc.status_code)
+            parts.clear()  # Release the batch upload bytes before retrying.
+            payload = None
+            for index, _ in pending:
+                if run.stop.is_set():
+                    break
+                records[index] = tag_file(run, paths[index])
+            return [records[index] for index in sorted(records)]
         elapsed = (time.monotonic() - started) / len(pending)
         for (index, source), item in zip(pending, results):
             raw = str(item.get("raw_model_response", ""))[:10000] if run.debug_model_response else ""
@@ -496,7 +518,7 @@ def run_data(run: Run, details: bool = False) -> dict[str, Any]:
     with run.lock:
         processed = len(run.records)
         remaining = max(0, run.planned_total - processed)
-        estimated = None if not processed else round(sum(item.elapsed_seconds for item in run.records) / processed * remaining, 3)
+        estimated = None if not processed or run.state not in ACTIVE_STATES else round(sum(item.elapsed_seconds for item in run.records) / processed * remaining, 3)
         data: dict[str, Any] = {"id": run.id, "folder": str(run.folder), "report_folder": str(run.directory), "windows_folder": run.windows_folder, "use_windows_path": run.use_windows_path, "debug_model_response": run.debug_model_response, "planned_total": run.planned_total, "skipped": run.skipped, "processed": processed, "successful": sum(x.status == "success" for x in run.records), "failed": sum(x.status != "success" for x in run.records), "elapsed_seconds": round(active_elapsed(run), 3), "estimated_remaining_seconds": estimated, "state": run.state, "current_source": run.current_source, "stop_reason": run.stop_reason, "fatal_error": run.fatal_error, "created_at": datetime.fromtimestamp(run.created_at, timezone.utc).isoformat()}
         data["batch_size"] = run.batch_size
         if details: data["records"] = [asdict(x) for x in run.records[-200:]]

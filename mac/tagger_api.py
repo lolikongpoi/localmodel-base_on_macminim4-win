@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel
 from starlette.formparsers import MultiPartParser
@@ -39,8 +39,8 @@ API_KEY = os.environ.get("TAGGER_API_KEY", "")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "100"))
 MAX_IMAGE_EDGE = int(os.environ.get("MAX_IMAGE_EDGE", "2048"))
 MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS", "350"))
-MAX_BATCH_SIZE = 4
-MAX_BATCH_PIXELS = 4_000_000
+MAX_BATCH_SIZE = 6
+MAX_BATCH_PIXELS = 30_000_000
 # Images at or below this size remain in RAM after preprocessing and are handed
 # straight to MLX-VLM as PIL images. Larger images use the former temporary
 # JPEG path so an unusually large upload cannot pressure unified memory.
@@ -379,7 +379,8 @@ def _infer_batch(items, capture_raw: bool) -> dict[int, dict[str, Any]]:
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
-    return {"status": "ok", "model": runtime.get("model_id", INITIAL_MODEL_ID), "max_batch_size": MAX_BATCH_SIZE}
+    return {"status": "ok", "model": runtime.get("model_id", INITIAL_MODEL_ID),
+            "max_batch_size": MAX_BATCH_SIZE, "max_batch_pixels": MAX_BATCH_PIXELS}
 
 
 @app.get("/", include_in_schema=False)
@@ -427,6 +428,17 @@ async def switch_model(request: ModelSwitchRequest) -> dict[str, str]:
     return {"model": target, "status": "active"}
 
 
+def _decode_image(payload: bytes) -> Image.Image:
+    try:
+        with Image.open(io.BytesIO(payload)) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+            image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+            return image
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError) as exc:
+        # Some malformed PNGs open successfully and only fail during image.load().
+        raise HTTPException(415, "the upload is not a readable image") from exc
+
+
 @app.post("/v1/tag", response_model=None, dependencies=[Depends(_require_api_key)])
 async def tag_image(
     image: UploadFile = File(...),
@@ -447,9 +459,7 @@ async def tag_image(
         # Decode and normalize the image in RAM. MLX-VLM accepts PIL images,
         # avoiding an SSD write for ordinary uploads. The disk fallback keeps
         # pathological 2K+ images from raising unified-memory pressure.
-        with Image.open(io.BytesIO(payload)) as source:
-            source = ImageOps.exif_transpose(source).convert("RGB")
-            source.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
+        with _decode_image(payload) as source:
             async with inference_lock:
                 if source.width * source.height <= IN_MEMORY_IMAGE_MAX_PIXELS:
                     inference = await asyncio.to_thread(_infer, source, capture_raw_response)
@@ -464,8 +474,8 @@ async def tag_image(
             value["raw_model_response"] = raw_model_response
             return value
         return inference
-    except UnidentifiedImageError as exc:
-        raise HTTPException(415, "the upload is not a readable image") from exc
+    except HTTPException:
+        raise
     except ModelResponseError as exc:
         return JSONResponse(
             status_code=502,
@@ -506,14 +516,9 @@ async def tag_batch(
                     raise HTTPException(400, "empty upload")
                 if len(payload) > limit:
                     raise HTTPException(413, f"image exceeds {MAX_UPLOAD_MB} MB")
-                with Image.open(io.BytesIO(payload)) as source:
-                    image = ImageOps.exif_transpose(source).convert("RGB")
-                    image.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
-                    items.append((index, image))
+                items.append((index, _decode_image(payload)))
             except HTTPException as exc:
                 results[index] = {"status": "error", "status_code": exc.status_code, "detail": exc.detail}
-            except (OSError, ValueError, Image.DecompressionBombError):
-                results[index] = {"status": "error", "status_code": 415, "detail": "the upload is not a readable image"}
         if items:
             async with inference_lock:
                 results.update(await asyncio.to_thread(_infer_batch, items, capture_raw))

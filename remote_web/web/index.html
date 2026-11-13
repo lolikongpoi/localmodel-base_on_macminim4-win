@@ -22,8 +22,8 @@
       <label>Mac API key</label><input id="key" type="password" autocomplete="off" placeholder="输入 TAGGER_API_KEY">
       <label>远程访问口令（如有）</label><input id="access" type="password" autocomplete="off">
       <div class="twocol"><div><label>最多图片数</label><input id="count" placeholder="全部"></div><div><label>最长时间（分钟）</label><input id="minutes" placeholder="不限"></div></div>
-      <label for="batch-size">每批图片数</label><select id="batch-size"><option value="1">1 张 · 逐张模式</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select>
-      <p class="hint">多图模式按图片分别记录结果，单张耗时显示该批的平均值；大图会自动拆成小批。</p>
+      <label for="batch-size">每批图片数</label><select id="batch-size"><option value="1">1 张 · 逐张模式</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option><option value="5">5 张</option><option value="6">6 张</option></select>
+      <p class="hint">每张图片独立记录。整批处理出错时会逐张重试；大批或大图可能占用较多内存。</p>
       <div class="checks"><label><input id="recursive" type="checkbox" checked>递归扫描子目录</label><label><input id="skip" type="checkbox" checked>跳过已有成功记录</label></div>
       <div class="actions"><button id="health" class="secondary">检查联通</button><button id="models" class="secondary">读取模型</button></div>
       <div class="twocol"><div><label>模型预设</label><select id="preset" disabled><option value="">请先读取模型列表</option></select></div><div style="display:flex;align-items:end"><button id="switch" class="secondary wide" disabled>切换模型</button></div></div>
@@ -107,8 +107,8 @@ function render(x){
   $('#success').textContent=x.successful;$('#failed').textContent=x.failed;
   $('#bar').style.width=x.planned_total?Math.min(100,x.processed/x.planned_total*100)+'%':'0%';
   $('#elapsed').textContent='已用时间：'+duration(x.elapsed_seconds);
-  $('#remaining').textContent='预计剩余：'+(x.estimated_remaining_seconds===null?'等待首批图片':duration(x.estimated_remaining_seconds));
-  $('#finish-at').textContent='预计完成：'+finishTime(x.estimated_remaining_seconds);
+  $('#remaining').textContent='预计剩余：'+(terminal?'—':x.estimated_remaining_seconds===null?'等待首批图片':duration(x.estimated_remaining_seconds));
+  $('#finish-at').textContent='预计完成：'+(terminal?'—':finishTime(x.estimated_remaining_seconds));
   $('#current').textContent=x.current_source||x.fatal_error||(terminal?'任务结束：'+(x.stop_reason||'error'):runState==='paused'?'已暂停。':'正在扫描图片目录…');
   $('#pause').disabled=!['running','paused'].includes(runState);$('#pause').textContent=runState==='paused'?'继续':'暂停';
   $('#stop').disabled=!active;$('#stop').textContent=x.batch_size>1?'停止（当前批次完成后）':'停止（当前图片完成后）';
