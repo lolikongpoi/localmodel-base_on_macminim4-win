@@ -12,13 +12,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from mac_tag_client import (
+    MAX_BATCH_SIZE,
     IncrementalReportWriter,
     MacTagService,
     TagRecord,
     find_completed_tag_sources,
     normalize_source_path,
     scan_images,
-    tag_with_single_retry,
+    tag_batch_records,
 )
 
 
@@ -50,6 +51,8 @@ class MacTagApp(tk.Tk):
         self.pause_event = threading.Event()
         self.pause_event.set()
         self.busy = False
+        self.model_presets: dict[str, str] = {}
+        self.connection_revision = 0
         self.records: list[TagRecord] = []
         self.records_by_item: dict[str, TagRecord] = {}
         self.started_at = 0.0
@@ -69,7 +72,9 @@ class MacTagApp(tk.Tk):
         self.output_var = tk.StringVar(value=str(PROJECT_DIR / "mac_tag_reports"))
         self.url_var = tk.StringVar(value=os.environ.get("IMAGE_TAGGER_URL", "http://"))
         self.key_var = tk.StringVar(value=os.environ.get("IMAGE_TAGGER_API_KEY", ""))
-        self.preset_var = tk.StringVar(value="4b")
+        self.preset_var = tk.StringVar()
+        self.batch_size_var = tk.StringVar(value="1")
+        self.batch_notice_var = tk.StringVar()
         self.limit_var = tk.StringVar()
         self.duration_var = tk.StringVar()
         self.folder_count_var = tk.StringVar(value="未统计")
@@ -101,9 +106,9 @@ class MacTagApp(tk.Tk):
         batch_actions.pack(side="right")
         self.start_button = ttk.Button(batch_actions, text="开始批量打 Tag", command=self._start_tagging)
         self.start_button.pack(side="left")
-        self.pause_button = ttk.Button(batch_actions, text="暂停（当前图片完成后）", command=self._toggle_pause, state="disabled")
+        self.pause_button = ttk.Button(batch_actions, text="暂停", command=self._toggle_pause, state="disabled")
         self.pause_button.pack(side="left", padx=(8, 0))
-        self.cancel_button = ttk.Button(batch_actions, text="停止（当前图片完成后）", command=self._cancel, state="disabled")
+        self.cancel_button = ttk.Button(batch_actions, text="停止", command=self._cancel, state="disabled")
         self.cancel_button.pack(side="left", padx=(8, 0))
 
         actions = ttk.Frame(form)
@@ -113,9 +118,9 @@ class MacTagApp(tk.Tk):
         self.models_button = ttk.Button(actions, text="读取模型", command=self._start_models)
         self.models_button.pack(side="left", padx=(8, 0))
         ttk.Label(actions, text="模型预设：").pack(side="left", padx=(20, 0))
-        self.preset_box = ttk.Combobox(actions, textvariable=self.preset_var, values=["4b", "8b"], width=5, state="readonly")
+        self.preset_box = ttk.Combobox(actions, textvariable=self.preset_var, width=14, state="disabled")
         self.preset_box.pack(side="left", padx=(4, 0))
-        self.switch_button = ttk.Button(actions, text="切换模型", command=self._start_switch)
+        self.switch_button = ttk.Button(actions, text="切换模型", command=self._start_switch, state="disabled")
         self.switch_button.pack(side="left", padx=(6, 0))
         ttk.Checkbutton(actions, text="递归扫描子文件夹", variable=self.recursive_var).pack(side="left", padx=(20, 0))
         self.count_button = ttk.Button(actions, text="统计图片数量", command=self._start_count)
@@ -130,6 +135,12 @@ class MacTagApp(tk.Tk):
         shortcuts = ttk.Frame(form)
         shortcuts.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         ttk.Checkbutton(shortcuts, text="跳过已完成 Tag 的图片", variable=self.skip_completed_var).pack(side="left")
+        ttk.Label(shortcuts, text="每批图片数").pack(side="left", padx=(18, 4))
+        ttk.Combobox(shortcuts, textvariable=self.batch_size_var,
+                     values=tuple(range(1, MAX_BATCH_SIZE + 1)), width=3, state="readonly").pack(side="left")
+        ttk.Label(shortcuts, textvariable=self.batch_notice_var).pack(side="left", padx=(8, 0))
+        self.url_var.trace_add("write", self._invalidate_models)
+        self.key_var.trace_add("write", self._invalidate_models)
         self.open_photo_button = ttk.Button(shortcuts, text="打开选中照片", command=self._open_selected_photo)
         self.open_photo_button.pack(side="right")
         self.open_explorer_button = ttk.Button(shortcuts, text="资源管理器中显示", command=self._show_selected_in_explorer)
@@ -179,23 +190,34 @@ class MacTagApp(tk.Tk):
     def _service(self) -> MacTagService:
         return MacTagService(self.url_var.get(), self.key_var.get())
 
+    def _update_model_controls(self) -> None:
+        available = bool(self.model_presets) and not self.busy
+        self.switch_button.configure(state="normal" if available else "disabled")
+        self.preset_box.configure(state="readonly" if available else "disabled")
+
+    def _invalidate_models(self, *_args: str) -> None:
+        self.connection_revision += 1
+        self.model_presets.clear()
+        self.preset_var.set("")
+        self.preset_box.configure(values=())
+        self._update_model_controls()
+
     def _set_busy(self, busy: bool) -> None:
         self.busy = busy
         state = "disabled" if busy else "normal"
         for button in (
             self.health_button,
             self.models_button,
-            self.switch_button,
             self.count_button,
             self.completed_check_button,
             self.start_button,
         ):
             button.configure(state=state)
-        self.preset_box.configure(state="disabled" if busy else "readonly")
+        self._update_model_controls()
         self.cancel_button.configure(state="normal" if busy else "disabled")
         self.pause_button.configure(state="normal" if busy else "disabled")
         if not busy:
-            self.pause_button.configure(text="暂停（当前图片完成后）")
+            self.pause_button.configure(text="暂停")
 
     @staticmethod
     def _positive_number(value: str, field_name: str, integer: bool = False) -> float | int | None:
@@ -220,10 +242,13 @@ class MacTagApp(tk.Tk):
             return
         self._set_busy(True)
         self.pause_button.configure(state="disabled")
+        self.cancel_button.configure(state="disabled")
         self.status_var.set("正在请求 Mac 服务……")
+        revision = self.connection_revision
         def worker() -> None:
             try:
-                self.events.put((kind, action(service)))
+                result = action(service)
+                self.events.put((kind, (revision, result) if kind == "models" else result))
             except Exception as exc:
                 self.events.put(("error", str(exc)))
         threading.Thread(target=worker, daemon=True).start()
@@ -232,10 +257,15 @@ class MacTagApp(tk.Tk):
         self._run_request("health", lambda service: service.health())
 
     def _start_models(self) -> None:
+        if self.busy:
+            return
+        self._invalidate_models()
         self._run_request("models", lambda service: service.models())
 
     def _start_switch(self) -> None:
         preset = self.preset_var.get()
+        if self.busy or preset not in self.model_presets:
+            return
         if not messagebox.askyesno("确认切换模型", f"将切换 Mac 上的模型到 {preset}。首次下载可能超过十分钟，期间服务不能识别图片。是否继续？"):
             return
         self._run_request("switch", lambda service: service.switch_model(preset))
@@ -288,7 +318,7 @@ class MacTagApp(tk.Tk):
             "folder": self.folder_var.get().strip(),
             "output_folder": self.output_var.get().strip(),
             "service_url": self.url_var.get().strip(),
-            "preset": self.preset_var.get(),
+            "batch_size": int(self.batch_size_var.get()),
             "recursive": self.recursive_var.get(),
             "max_images": self.limit_var.get().strip(),
             "max_minutes": self.duration_var.get().strip(),
@@ -324,8 +354,8 @@ class MacTagApp(tk.Tk):
             self.folder_var.set(str(data.get("folder", "")))
             self.output_var.set(str(data.get("output_folder", str(PROJECT_DIR / "mac_tag_reports"))))
             self.url_var.set(str(data.get("service_url", "http://")))
-            preset = str(data.get("preset", "4b"))
-            self.preset_var.set(preset if preset in {"4b", "8b"} else "4b")
+            batch_size = str(data.get("batch_size", 1))
+            self.batch_size_var.set(batch_size if batch_size in self._batch_size_choices() else "1")
             self.recursive_var.set(bool(data.get("recursive", True)))
             self.limit_var.set(str(data.get("max_images", "")))
             self.duration_var.set(str(data.get("max_minutes", "")))
@@ -334,6 +364,10 @@ class MacTagApp(tk.Tk):
             self.status_var.set("配置已读取。为安全起见，API key 未保存，请重新输入。")
         except Exception as exc:
             messagebox.showerror("读取失败", f"无法读取配置：{exc}")
+
+    @staticmethod
+    def _batch_size_choices() -> set[str]:
+        return {str(size) for size in range(1, MAX_BATCH_SIZE + 1)}
 
     def _start_tagging(self) -> None:
         try:
@@ -344,6 +378,7 @@ class MacTagApp(tk.Tk):
             if not str(output):
                 raise ValueError("请选择报告保存位置")
             service = self._service()
+            batch_size = int(self.batch_size_var.get())
             paths = scan_images(folder, self.recursive_var.get())
             if not paths:
                 raise ValueError("此文件夹中没有支持的图片")
@@ -365,6 +400,7 @@ class MacTagApp(tk.Tk):
             messagebox.showerror("无法开始", str(exc))
             return
         self.cancel_event.clear()
+        self.batch_notice_var.set("")
         self.pause_event.set()
         self.records = []
         self.records_by_item = {}
@@ -389,12 +425,13 @@ class MacTagApp(tk.Tk):
         self.status_var.set(f"正在检查 Mac 服务并准备处理 {len(paths)} 张图片……{'；'.join(detail)}")
         threading.Thread(
             target=self._tag_worker,
-            args=(service, folder, output, paths, None if duration_minutes is None else float(duration_minutes) * 60),
+            args=(service, folder, output, paths, self.last_time_limit_seconds, batch_size),
             daemon=True,
         ).start()
 
     def _tag_worker(
-        self, service: MacTagService, folder: Path, output: Path, paths: list[Path], max_seconds: float | None
+        self, service: MacTagService, folder: Path, output: Path, paths: list[Path],
+        max_seconds: float | None, batch_size: int = 1,
     ) -> None:
         writer: IncrementalReportWriter | None = None
         stop_reason = "completed"
@@ -405,10 +442,17 @@ class MacTagApp(tk.Tk):
             if health.get("status") != "ok":
                 raise RuntimeError(f"Mac 服务健康检查未通过：{health}")
             self.events.put(("model_status", health))
+            server_limit = health.get("max_batch_size", 1)
+            if type(server_limit) is not int or server_limit < 1:
+                server_limit = 1
+            effective_size = min(batch_size, server_limit)
+            if effective_size != batch_size:
+                self.events.put(("batch_limit", effective_size))
             deadline = time.monotonic() + max_seconds if max_seconds is not None else None
             pause_started: float | None = None
             pause_announced = False
-            for index, path in enumerate(paths, start=1):
+            processing_seconds = 0.0
+            for offset in range(0, len(paths), effective_size):
                 if self.cancel_event.is_set():
                     stop_reason = "user_stop"
                     break
@@ -432,16 +476,19 @@ class MacTagApp(tk.Tk):
                 if deadline is not None and time.monotonic() >= deadline:
                     stop_reason = "time_limit"
                     break
-                self.events.put(("current", (index, len(paths), path.name)))
-                record = tag_with_single_retry(service, path)
-                self.records.append(record)
-                assert writer is not None
-                writer.append(record)
-                average = sum(item.elapsed_seconds for item in self.records) / index
-                eta = average * (len(paths) - index)
-                if deadline is not None:
-                    eta = min(eta, max(0.0, deadline - time.monotonic()))
-                self.events.put(("record", (index, len(paths), record, eta)))
+                chunk = paths[offset:offset + effective_size]
+                label = chunk[0].name if len(chunk) == 1 else f"本批 {len(chunk)} 张"
+                self.events.put(("current", (offset + 1, len(paths), label)))
+                batch_started = time.monotonic()
+                for index, record in enumerate(tag_batch_records(service, chunk), start=offset + 1):
+                    writer.append(record)
+                    self.records.append(record)
+                    elapsed = processing_seconds + time.monotonic() - batch_started
+                    eta = elapsed / index * (len(paths) - index)
+                    if deadline is not None:
+                        eta = min(eta, max(0.0, deadline - time.monotonic()))
+                    self.events.put(("record", (index, len(paths), record, eta)))
+                processing_seconds += time.monotonic() - batch_started
             run_dir = writer.finish(planned_total=len(paths), stop_reason=stop_reason)
             self.events.put(("finished", (run_dir, stop_reason, len(paths), len(self.records))))
         except Exception as exc:
@@ -454,17 +501,17 @@ class MacTagApp(tk.Tk):
 
     def _cancel(self) -> None:
         self.cancel_event.set()
-        self.status_var.set("收到停止请求：当前图片完成后结束；已完成结果已即时保存。")
+        self.status_var.set("收到停止请求：当前批次完成后结束；已完成结果已即时保存。")
         self.cancel_button.configure(state="disabled")
 
     def _toggle_pause(self) -> None:
         if self.pause_event.is_set():
             self.pause_event.clear()
             self.pause_button.configure(text="继续")
-            self.status_var.set("暂停请求已发送：当前图片完成后暂停；已完成结果已即时保存。")
+            self.status_var.set("暂停请求已发送：当前批次完成后暂停；已完成结果已即时保存。")
         else:
             self.pause_event.set()
-            self.pause_button.configure(text="暂停（当前图片完成后）")
+            self.pause_button.configure(text="暂停")
 
     def _add_record(self, record: TagRecord) -> None:
         item = self.table.insert("", "end", values=(
@@ -540,10 +587,21 @@ class MacTagApp(tk.Tk):
                     self.status_var.set(f"联通成功：模型 {health.get('model', '未知')}。")
                 elif kind == "models":
                     self._set_busy(False)
-                    models = payload
+                    revision, models = payload
+                    if revision != self.connection_revision:
+                        self.status_var.set("连接配置已更改，请重新读取模型。")
+                        continue
                     current = models.get("current_model", "未知")
                     presets = models.get("presets", {})
-                    self.status_var.set(f"当前模型：{current}；可选预设：{', '.join(presets.keys()) or '未返回'}。")
+                    if isinstance(presets, dict):
+                        self.model_presets = {
+                            key: value for key, value in presets.items()
+                            if key.strip() and isinstance(value, str) and value.strip()
+                        }
+                    self.preset_box.configure(values=tuple(self.model_presets))
+                    self.preset_var.set(next((key for key, value in self.model_presets.items() if value == current), ""))
+                    self._update_model_controls()
+                    self.status_var.set(f"当前模型：{current}。可选预设：{', '.join(self.model_presets) or '未返回'}。")
                 elif kind == "switch":
                     self._set_busy(False)
                     response = payload
@@ -551,6 +609,8 @@ class MacTagApp(tk.Tk):
                 elif kind == "model_status":
                     health = payload
                     self.status_var.set(f"Mac 服务已就绪，模型：{health.get('model', '未知')}。")
+                elif kind == "batch_limit":
+                    self.batch_notice_var.set(f"本次按服务上限每批 {payload} 张")
                 elif kind == "current":
                     index, total, name = payload
                     self.status_var.set(f"正在处理 {index}/{total}：{name}")

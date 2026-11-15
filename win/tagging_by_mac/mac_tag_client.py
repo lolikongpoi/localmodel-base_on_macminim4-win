@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff", ".gif"}
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_BATCH_SIZE = 6
 
 
 class TagServiceError(RuntimeError):
@@ -86,7 +87,7 @@ class MacTagService:
         self,
         method: str,
         endpoint: str,
-        body: bytes | None = None,
+        body: bytes | bytearray | None = None,
         content_type: str | None = None,
         timeout: int = 30,
         with_key: bool = True,
@@ -120,26 +121,46 @@ class MacTagService:
         return self._request("GET", "/v1/models", timeout=30)
 
     def switch_model(self, preset: str) -> dict[str, Any]:
-        if preset not in {"4b", "8b"}:
-            raise ValueError("模型预设只能是 4b 或 8b")
+        if not preset.strip():
+            raise ValueError("请选择服务返回的模型预设")
         body = json.dumps({"preset": preset}, ensure_ascii=False).encode("utf-8")
         return self._request("POST", "/v1/model", body, "application/json", timeout=600)
 
     def tag(self, image_path: Path) -> dict[str, Any]:
-        size = image_path.stat().st_size
-        if size > MAX_UPLOAD_BYTES:
-            raise TagServiceError(413, friendly_error(413), f"文件大小：{size} bytes")
+        return self._upload("/v1/tag", "image", [image_path])
+
+    def tag_batch(self, paths: list[Path]) -> list[dict[str, Any]]:
+        if not 1 <= len(paths) <= MAX_BATCH_SIZE:
+            raise ValueError("每批图片数必须在 1 到 6 之间")
+        items = self._upload("/v1/tag/batch", "images", paths).get("results")
+        if not isinstance(items, list) or len(items) != len(paths) or any(
+            not isinstance(item, dict) or item.get("index") != index
+            or item.get("status") not in {"success", "error"}
+            or (item["status"] == "success" and not isinstance(item.get("result"), dict))
+            for index, item in enumerate(items)
+        ):
+            raise TagServiceError(502, "批次响应的图片数量、顺序或格式异常")
+        return items
+
+    def _upload(self, endpoint: str, field: str, paths: list[Path]) -> dict[str, Any]:
         boundary = f"----LocalTagger{uuid.uuid4().hex}"
-        mime = mimetypes.guess_type(image_path.name)[0] or "application/octet-stream"
-        safe_name = image_path.name.replace('"', "_")
-        prefix = (
-            f"--{boundary}\r\n"
-            f'Content-Disposition: form-data; name="image"; filename="{safe_name}"\r\n'
-            f"Content-Type: {mime}\r\n\r\n"
-        ).encode("utf-8")
-        suffix = f"\r\n--{boundary}--\r\n".encode("utf-8")
-        body = prefix + image_path.read_bytes() + suffix
-        return self._request("POST", "/v1/tag", body, f"multipart/form-data; boundary={boundary}", timeout=180)
+        body = bytearray()
+        for path in paths:
+            with path.open("rb") as handle:
+                content = handle.read(MAX_UPLOAD_BYTES + 1)
+            if len(content) > MAX_UPLOAD_BYTES:
+                raise TagServiceError(413, friendly_error(413), path.name)
+            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            name = path.name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+            body.extend((
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{field}"; filename="{name}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n"
+            ).encode("utf-8"))
+            body.extend(content)
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode("ascii"))
+        return self._request("POST", endpoint, body, f"multipart/form-data; boundary={boundary}", timeout=180 * len(paths))
 
 
 @dataclass
@@ -291,6 +312,35 @@ def tag_with_single_retry(service: MacTagService, path: Path) -> TagRecord:
                 details=f"{type(exc).__name__}: {exc}"[:1000],
             )
     raise AssertionError("unreachable")
+
+
+def tag_batch_records(service: MacTagService, paths: list[Path]) -> Iterable[TagRecord]:
+    """保留图片顺序和单图错误，整批被拒绝时逐张处理。"""
+    if len(paths) == 1:
+        yield tag_with_single_retry(service, paths[0])
+        return
+    started = time.monotonic()
+    try:
+        items = service.tag_batch(paths)
+    except OSError:
+        items = None
+    except TagServiceError as exc:
+        if exc.status not in {400, 404, 405, 413, 415, 422} and not (exc.status and 500 <= exc.status < 600):
+            raise
+        items = None
+    if items is None:
+        for path in paths:
+            yield tag_with_single_retry(service, path)
+        return
+    elapsed = (time.monotonic() - started) / len(paths)
+    for path, item in zip(paths, items):
+        if item["status"] == "success":
+            yield record_from_response(path, item["result"], elapsed)
+        elif item.get("status_code") == 502:
+            yield tag_with_single_retry(service, path)
+        else:
+            yield TagRecord(str(path), "error", elapsed, error=str(item.get("detail") or "图片识别失败"),
+                            details=f"HTTP {item.get('status_code', '未知')}")
 
 
 def write_reports(records: list[TagRecord], output_root: Path, source_folder: Path, service_url: str) -> Path:
