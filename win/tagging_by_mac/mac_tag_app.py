@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
@@ -670,5 +671,36 @@ class MacTagApp(tk.Tk):
         self.after(100, self._poll_events)
 
 
+STARTUP_READY = "MAC_TAG_WINDOW_READY"
+
+
+def launch_detached() -> int:
+    """Keep the launcher open until the GUI is ready or reports a startup error."""
+    child = subprocess.Popen(
+        [sys.executable, "-u", str(Path(__file__).resolve()), "--startup-signal"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    assert child.stdout is not None
+    with child.stdout as output:
+        for line in output:
+            if line.rstrip() == STARTUP_READY:
+                return 0
+            print(line, end="")
+    child.wait()
+    return 1
+
+
 if __name__ == "__main__":
-    MacTagApp().mainloop()
+    if sys.argv[1:] == ["--detach"]:
+        raise SystemExit(launch_detached())
+    app = MacTagApp()
+    if sys.argv[1:] == ["--startup-signal"]:
+        app.after_idle(lambda: print(STARTUP_READY, flush=True))
+    app.mainloop()

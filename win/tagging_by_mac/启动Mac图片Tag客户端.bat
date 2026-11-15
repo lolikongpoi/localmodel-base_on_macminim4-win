@@ -7,9 +7,11 @@ if not exist "%PYTHON%" (
   pause
   exit /b 1
 )
-"%PYTHON%" "%~dp0mac_tag_app.py"
+"%PYTHON%" "%~dp0mac_tag_app.py" --detach
 if errorlevel 1 (
   echo.
   echo Application failed. Keep this window open and copy the error above.
   pause
+  exit /b 1
 )
+exit /b 0
