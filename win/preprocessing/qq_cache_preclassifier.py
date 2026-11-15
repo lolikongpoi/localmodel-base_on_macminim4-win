@@ -47,7 +47,7 @@ class ClassifiedFile:
     @property
     def needs_png_conversion(self) -> bool:
         """QQ cache files without a suffix are exported as real, named PNG files."""
-        return not self.source.suffix and self.width is not None
+        return not self.source.suffix and self.width is not None and not self.operation.startswith("删除")
 
 
 def discover_qq_cache() -> Path | None:
@@ -69,8 +69,12 @@ def discover_qq_cache() -> Path | None:
     return max(candidates, key=lambda item: item.stat().st_mtime)
 
 
-def iter_candidates(root: Path, recursive: bool = True):
-    """Yield likely image files, including extensionless cache files that Pillow can verify."""
+def is_image_candidate(path: Path) -> bool:
+    return path.name.lower() not in SYSTEM_NAMES and (path.suffix.lower() in IMAGE_EXTENSIONS or not path.suffix)
+
+
+def iter_candidates(root: Path, recursive: bool = True, *, scan_all_files: bool = False):
+    """遍历普通文件，默认只返回支持的后缀和无后缀文件。"""
     stack = [root]
     while stack:
         folder = stack.pop()
@@ -83,12 +87,26 @@ def iter_candidates(root: Path, recursive: bool = True):
                                 stack.append(Path(entry.path))
                         elif entry.is_file(follow_symlinks=False):
                             path = Path(entry.path)
-                            if path.name.lower() not in SYSTEM_NAMES and (path.suffix.lower() in IMAGE_EXTENSIONS or not path.suffix):
+                            if scan_all_files or is_image_candidate(path):
                                 yield path
                     except OSError:
                         continue
         except OSError:
             continue
+
+
+def read_gif_info(path: Path) -> tuple[int, int, int] | None:
+    """识别带 GIF 签名且具有可读图像头的文件，无需解码像素或动画帧。"""
+    try:
+        with path.open("rb") as handle:
+            if handle.read(6) not in (b"GIF87a", b"GIF89a"):
+                return None
+            handle.seek(0)
+            with Image.open(handle, formats=["GIF"]) as image:
+                width, height = image.size
+                return width, height, os.fstat(handle.fileno()).st_size
+    except (OSError, ValueError, SyntaxError):
+        return None
 
 
 def image_info(path: Path) -> tuple[int | None, int | None, str, str]:
@@ -189,8 +207,11 @@ def run_preclassification(
     resume_event: threading.Event | None = None,
     stop_event: threading.Event | None = None,
     discard_small: bool = False,
+    discard_gif: bool = False,
 ) -> tuple[list[ClassifiedFile], Path, bool]:
-    paths = list(iter_candidates(source, recursive))
+    if discard_gif and action != "move":
+        raise ValueError("丢弃 GIF 只能用于移动模式")
+    paths = list(iter_candidates(source, recursive, scan_all_files=discard_gif))
     items: list[ClassifiedFile] = []
     total = len(paths)
     for index, path in enumerate(paths, 1):
@@ -200,8 +221,16 @@ def run_preclassification(
                 break
         if stop_event is not None and stop_event.is_set():
             break
-        item = classify(path)
-        if action != "preview":
+        gif_info = read_gif_info(path) if discard_gif else None
+        if gif_info is not None:
+            width, height, size_bytes = gif_info
+            path.unlink()
+            item = ClassifiedFile(path, "丢弃 GIF", size_bytes, width, height, "GIF", "按文件内容识别", "删除（GIF）")
+        elif not is_image_candidate(path):
+            continue
+        else:
+            item = classify(path)
+        if action != "preview" and gif_info is None:
             if discard_small and action == "move" and item.size_bytes <= MIN_SIZE:
                 path.unlink()
                 item = replace(item, operation="删除（≤10KB）")
@@ -223,7 +252,7 @@ def run_preclassification(
         items.append(item)
         if progress:
             progress(index, total, item)
-    stopped = (stop_event is not None and stop_event.is_set()) or len(items) < total
+    stopped = stop_event is not None and stop_event.is_set()
     action_label = {"preview": "仅预览", "copy": "复制", "move": "移动"}[action]
     if stopped:
         action_label = f"{action_label}（已停止）"
@@ -258,6 +287,7 @@ class PreclassifierApp:
         self.action_var = StringVar(value="preview")
         self.recursive_var = BooleanVar(value=True)
         self.discard_small_var = BooleanVar(value=False)
+        self.discard_gif_var = BooleanVar(value=False)
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
         self.paused = False
@@ -287,8 +317,12 @@ class PreclassifierApp:
         action.grid(row=2, column=1, sticky="w", padx=8)
         action.bind("<<ComboboxSelected>>", self._update_discard_state)
         ttk.Label(frame, text="preview 仅生成清单；copy 默认安全；move 会移动缓存文件。", foreground="#555").grid(row=3, column=1, sticky="w", padx=8)
-        self.discard_small_checkbox = ttk.Checkbutton(frame, text="移动时直接丢弃（删除）≤10KB 文件", variable=self.discard_small_var)
-        self.discard_small_checkbox.grid(row=4, column=1, sticky="w", padx=8, pady=(4, 0))
+        discard_options = ttk.Frame(frame)
+        discard_options.grid(row=4, column=1, sticky="w", padx=8, pady=(4, 0))
+        self.discard_small_checkbox = ttk.Checkbutton(discard_options, text="丢弃（删除）≤10KB 文件", variable=self.discard_small_var)
+        self.discard_small_checkbox.pack(side=LEFT)
+        self.discard_gif_checkbox = ttk.Checkbutton(discard_options, text="丢弃所有 GIF（按文件内容）", variable=self.discard_gif_var)
+        self.discard_gif_checkbox.pack(side=LEFT, padx=(12, 0))
         ttk.Checkbutton(frame, text="递归扫描子文件夹", variable=self.recursive_var).grid(row=5, column=1, sticky="w", padx=8, pady=4)
         self.start_button = ttk.Button(frame, text="开始预分类", command=self._start)
         self.start_button.grid(row=6, column=1, sticky="w", padx=8, pady=10)
@@ -328,9 +362,12 @@ class PreclassifierApp:
     def _update_discard_state(self, _event=None):
         if self.action_var.get() == "move":
             self.discard_small_checkbox.configure(state="normal")
+            self.discard_gif_checkbox.configure(state="normal")
         else:
             self.discard_small_var.set(False)
             self.discard_small_checkbox.configure(state="disabled")
+            self.discard_gif_var.set(False)
+            self.discard_gif_checkbox.configure(state="disabled")
 
     def _start(self):
         if self.running:
@@ -345,7 +382,14 @@ class PreclassifierApp:
             return
         if self.action_var.get() == "move" and not messagebox.askyesno("确认移动", "移动会改变 QQ 缓存中的文件位置。确认继续吗？"):
             return
-        if self.discard_small_var.get() and not messagebox.askyesno("确认永久删除", "已勾选直接丢弃 ≤10KB 文件。此操作会永久删除这些源文件，不能撤销。确认继续吗？"):
+        discard_small = self.discard_small_var.get()
+        discard_gif = self.discard_gif_var.get()
+        rules = []
+        if discard_small:
+            rules.append("≤10KB 文件")
+        if discard_gif:
+            rules.append("按内容识别出的 GIF 文件（包括无后缀和改名的文件）")
+        if rules and not messagebox.askyesno("确认永久删除", f"将永久删除以下源文件：{'、'.join(rules)}。确认继续吗？"):
             return
         self.running = True
         self.paused = False
@@ -360,11 +404,12 @@ class PreclassifierApp:
         self.start_button.configure(state="disabled")
         self.pause_button.configure(state="normal", text="暂停")
         self.stop_button.configure(state="normal")
+        self.progress.configure(value=0)
         self.log.delete(*self.log.get_children())
         self.status_var.set("正在扫描并处理…")
         threading.Thread(
             target=self._work,
-            args=(source, output, self.action_var.get(), self.recursive_var.get(), self.discard_small_var.get()),
+            args=(source, output, self.action_var.get(), self.recursive_var.get(), discard_small, discard_gif),
             daemon=True,
         ).start()
         self._refresh_timing()
@@ -395,12 +440,15 @@ class PreclassifierApp:
         self.stop_button.configure(state="disabled")
         self.status_var.set("正在停止；当前文件完成后会生成部分处理报告。")
 
-    def _work(self, source: Path, output: Path, action: str, recursive: bool, discard_small: bool):
+    def _work(self, source: Path, output: Path, action: str, recursive: bool, discard_small: bool, discard_gif: bool):
         def progress(done: int, total: int, item: ClassifiedFile):
             if done <= 200 or done % 50 == 0 or done == total:
                 self.events.put(("progress", (done, total, item)))
         try:
-            items, report, stopped = run_preclassification(source, output, action, recursive, progress, self.resume_event, self.stop_event, discard_small)
+            items, report, stopped = run_preclassification(
+                source, output, action, recursive, progress, self.resume_event, self.stop_event,
+                discard_small=discard_small, discard_gif=discard_gif,
+            )
             self.events.put(("done", (items, report, stopped)))
         except Exception as exc:
             self.events.put(("error", str(exc)))
@@ -427,6 +475,8 @@ class PreclassifierApp:
                     self.pause_button.configure(state="disabled", text="暂停")
                     self.stop_button.configure(state="disabled")
                     summary = format_summary(items, report, stopped)
+                    if not stopped:
+                        self.progress.configure(value=self.progress.cget("maximum"))
                     self.status_var.set(summary.splitlines()[0])
                     self._refresh_timing(final=True)
                     messagebox.showinfo("预分类已停止" if stopped else "预分类完成", summary)
@@ -467,6 +517,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="分类结果目录")
     parser.add_argument("--action", choices=("preview", "copy", "move"), default="preview")
     parser.add_argument("--discard-small", action="store_true", help="仅在 move 模式下永久删除 ≤10KB 文件")
+    parser.add_argument("--discard-gif", action="store_true", help="仅在 move 模式下按内容识别并永久删除 GIF")
     parser.add_argument("--no-recursive", action="store_true", help="只扫描当前目录")
     parser.add_argument("--gui", action="store_true", help="打开图形界面")
     return parser.parse_args()
@@ -483,11 +534,16 @@ def main() -> None:
         raise SystemExit(f"缓存文件夹不存在：{args.source}")
     if args.discard_small and args.action != "move":
         raise SystemExit("--discard-small 只能与 --action move 一起使用")
+    if args.discard_gif and args.action != "move":
+        raise SystemExit("--discard-gif 只能与 --action move 一起使用")
     started = time.monotonic()
     def progress(done: int, total: int, item: ClassifiedFile):
         if done == total or done % 100 == 0:
             print(f"{done}/{total}  {item.source.name}", flush=True)
-    items, report, stopped = run_preclassification(args.source, args.output, args.action, not args.no_recursive, progress, discard_small=args.discard_small)
+    items, report, stopped = run_preclassification(
+        args.source, args.output, args.action, not args.no_recursive, progress,
+        discard_small=args.discard_small, discard_gif=args.discard_gif,
+    )
     print(format_summary(items, report, stopped))
     print(f"耗时：{time.monotonic() - started:.1f} 秒")
 
