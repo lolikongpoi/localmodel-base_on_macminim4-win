@@ -215,10 +215,18 @@ def run_preclassification(
     stop_event: threading.Event | None = None,
     discard_small: bool = False,
     separate_gif: bool = False,
+    only_gif: bool = False,
+    max_images: int | None = None,
 ) -> tuple[list[ClassifiedFile], Path, bool]:
-    paths = list(iter_candidates(source, recursive, scan_all_files=separate_gif))
+    if only_gif and action != "move":
+        raise ValueError("只移动 GIF 只能用于移动模式")
+    if max_images is not None and max_images < 1:
+        raise ValueError("最多处理数量必须是正整数")
+    detect_gif = separate_gif or only_gif
+    paths = list(iter_candidates(source, recursive, scan_all_files=detect_gif))
     items: list[ClassifiedFile] = []
     total = len(paths)
+    counted = 0
     for index, path in enumerate(paths, 1):
         # Controls take effect between files, so a copied/converted file is never left half-written.
         while resume_event is not None and not resume_event.wait(0.2):
@@ -226,11 +234,11 @@ def run_preclassification(
                 break
         if stop_event is not None and stop_event.is_set():
             break
-        gif_info = read_gif_info(path) if separate_gif else None
+        gif_info = read_gif_info(path) if detect_gif else None
         if gif_info is not None:
             width, height, size_bytes = gif_info
             item = ClassifiedFile(path, "GIF", size_bytes, width, height, "GIF", "按文件内容识别，单独保存")
-        elif not is_image_candidate(path):
+        elif only_gif or not is_image_candidate(path):
             continue
         else:
             item = classify(path)
@@ -254,8 +262,15 @@ def run_preclassification(
                     shutil.move(str(path), str(target))
                     item = replace(item, operation="移动")
         items.append(item)
+        if action != "move" or item.operation.startswith("移动"):
+            counted += 1
         if progress:
-            progress(index, total, item)
+            if max_images is None:
+                progress(index, total, item)
+            else:
+                progress(counted, max_images, item)
+        if max_images is not None and counted == max_images:
+            break
     stopped = stop_event is not None and stop_event.is_set()
     action_label = {"preview": "仅预览", "copy": "复制", "move": "移动"}[action]
     if stopped:
@@ -292,6 +307,8 @@ class PreclassifierApp:
         self.recursive_var = BooleanVar(value=True)
         self.discard_small_var = BooleanVar(value=False)
         self.separate_gif_var = BooleanVar(value=False)
+        self.only_gif_var = BooleanVar(value=False)
+        self.max_images_var = StringVar()
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
         self.paused = False
@@ -328,7 +345,16 @@ class PreclassifierApp:
         ttk.Checkbutton(
             discard_options, text="单独保存 GIF（按文件内容）", variable=self.separate_gif_var,
         ).pack(side=LEFT, padx=(12, 0))
-        ttk.Checkbutton(frame, text="递归扫描子文件夹", variable=self.recursive_var).grid(row=5, column=1, sticky="w", padx=8, pady=4)
+        scope = ttk.Frame(frame)
+        scope.grid(row=5, column=1, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(scope, text="递归扫描子文件夹", variable=self.recursive_var).pack(side=LEFT)
+        self.only_gif_checkbox = ttk.Checkbutton(
+            scope, text="只移动 GIF（按文件内容）", variable=self.only_gif_var,
+        )
+        self.only_gif_checkbox.pack(side=LEFT, padx=(12, 0))
+        ttk.Label(scope, text="最多处理数量").pack(side=LEFT, padx=(12, 4))
+        ttk.Entry(scope, textvariable=self.max_images_var, width=8).pack(side=LEFT)
+        ttk.Label(scope, text="留空不限").pack(side=LEFT, padx=(4, 0))
         self.start_button = ttk.Button(frame, text="开始预分类", command=self._start)
         self.start_button.grid(row=6, column=1, sticky="w", padx=8, pady=10)
         controls = ttk.Frame(frame)
@@ -367,9 +393,12 @@ class PreclassifierApp:
     def _update_discard_state(self, _event=None):
         if self.action_var.get() == "move":
             self.discard_small_checkbox.configure(state="normal")
+            self.only_gif_checkbox.configure(state="normal")
         else:
             self.discard_small_var.set(False)
             self.discard_small_checkbox.configure(state="disabled")
+            self.only_gif_var.set(False)
+            self.only_gif_checkbox.configure(state="disabled")
 
     def _start(self):
         if self.running:
@@ -382,9 +411,19 @@ class PreclassifierApp:
         if source.resolve() == output.resolve() or source in output.parents:
             messagebox.showerror("输出位置不安全", "输出文件夹不能是缓存文件夹本身或其上级文件夹。")
             return
-        if self.action_var.get() == "move" and not messagebox.askyesno("确认移动", "移动会改变 QQ 缓存中的文件位置。确认继续吗？"):
+        raw_limit = self.max_images_var.get().strip()
+        try:
+            max_images = int(raw_limit) if raw_limit else None
+            if max_images is not None and max_images < 1:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("数量无效", "最多处理数量请填写正整数，或留空。")
             return
-        discard_small = self.discard_small_var.get()
+        action = self.action_var.get()
+        if action == "move" and not messagebox.askyesno("确认移动", "移动会改变 QQ 缓存中的文件位置。确认继续吗？"):
+            return
+        only_gif = action == "move" and self.only_gif_var.get()
+        discard_small = self.discard_small_var.get() and not only_gif
         separate_gif = self.separate_gif_var.get()
         if discard_small and not messagebox.askyesno(
             "确认永久删除",
@@ -411,7 +450,7 @@ class PreclassifierApp:
         self.status_var.set("正在扫描并处理…")
         threading.Thread(
             target=self._work,
-            args=(source, output, self.action_var.get(), self.recursive_var.get(), discard_small, separate_gif),
+            args=(source, output, action, self.recursive_var.get(), discard_small, separate_gif, only_gif, max_images),
             daemon=True,
         ).start()
         self._refresh_timing()
@@ -442,7 +481,10 @@ class PreclassifierApp:
         self.stop_button.configure(state="disabled")
         self.status_var.set("正在停止；当前文件完成后会生成部分处理报告。")
 
-    def _work(self, source: Path, output: Path, action: str, recursive: bool, discard_small: bool, separate_gif: bool):
+    def _work(
+        self, source: Path, output: Path, action: str, recursive: bool,
+        discard_small: bool, separate_gif: bool, only_gif: bool, max_images: int | None,
+    ):
         def progress(done: int, total: int, item: ClassifiedFile):
             if done <= 200 or done % 50 == 0 or done == total:
                 self.events.put(("progress", (done, total, item)))
@@ -450,6 +492,7 @@ class PreclassifierApp:
             items, report, stopped = run_preclassification(
                 source, output, action, recursive, progress, self.resume_event, self.stop_event,
                 discard_small=discard_small, separate_gif=separate_gif,
+                only_gif=only_gif, max_images=max_images,
             )
             self.events.put(("done", (items, report, stopped)))
         except Exception as exc:
@@ -520,6 +563,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action", choices=("preview", "copy", "move"), default="preview")
     parser.add_argument("--discard-small", action="store_true", help="仅在 move 模式下永久删除 ≤10KB 文件")
     parser.add_argument("--separate-gif", action="store_true", help="按文件内容识别 GIF 并单独归档")
+    parser.add_argument("--only-gif", action="store_true", help="仅在 move 模式下按内容识别并移动 GIF")
+    parser.add_argument("--max-images", type=int, help="最多处理的图片数；移动模式只统计已移动的文件")
     parser.add_argument("--no-recursive", action="store_true", help="只扫描当前目录")
     parser.add_argument("--gui", action="store_true", help="打开图形界面")
     return parser.parse_args()
@@ -536,6 +581,10 @@ def main() -> None:
         raise SystemExit(f"缓存文件夹不存在：{args.source}")
     if args.discard_small and args.action != "move":
         raise SystemExit("--discard-small 只能与 --action move 一起使用")
+    if args.only_gif and args.action != "move":
+        raise SystemExit("--only-gif 只能与 --action move 一起使用")
+    if args.max_images is not None and args.max_images < 1:
+        raise SystemExit("--max-images 必须是正整数")
     started = time.monotonic()
     def progress(done: int, total: int, item: ClassifiedFile):
         if done == total or done % 100 == 0:
@@ -543,6 +592,7 @@ def main() -> None:
     items, report, stopped = run_preclassification(
         args.source, args.output, args.action, not args.no_recursive, progress,
         discard_small=args.discard_small, separate_gif=args.separate_gif,
+        only_gif=args.only_gif, max_images=args.max_images,
     )
     print(format_summary(items, report, stopped))
     print(f"耗时：{time.monotonic() - started:.1f} 秒")
