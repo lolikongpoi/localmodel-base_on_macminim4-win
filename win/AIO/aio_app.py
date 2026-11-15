@@ -298,9 +298,20 @@ class AioApp(tk.Tk):
                             self._write_log(f"手动检查：可归档 {len(workable)} 张，当前未触发自动移动。")
                 elif kind == "move_progress":
                     phase, data = payload
-                    index, total, plan = data
                     labels = {"copy": "复制并校验", "promote": "整理到分类目录", "delete": "删除已验证原图"}
-                    self.condition_var.set(f"{labels.get(phase, phase)} {index}/{total}：{plan.entry.source.name}")
+                    if phase in labels:
+                        index, total, plan = data
+                        self.condition_var.set(f"{labels[phase]} {index}/{total}：{plan.entry.source.name}")
+                    elif phase == "copy_ready":
+                        verified, skipped = data
+                        suffix = f"，跳过 {skipped} 张" if skipped else ""
+                        self.condition_var.set(f"复制校验完成 {verified} 张{suffix}，正在准备归档…")
+                    elif phase == "copy_failures":
+                        failures, verified, total = data
+                        self.condition_var.set(f"复制校验通过 {verified}/{total} 张，失败 {len(failures)} 张")
+                        self._write_log(f"复制或校验失败 {len(failures)} 张，本批无法自动继续。")
+                        for failure in failures[:5]:
+                            self._write_log(f"{failure.plan.entry.source.name}：{failure.error}")
                 elif kind == "move_finished":
                     self.auto_busy = False
                     self.last_move_at = time.monotonic()
@@ -323,7 +334,8 @@ class AioApp(tk.Tk):
                     messagebox.showerror("自动归档未完成", f"{payload}\n\n原图在复制/校验失败时不会被删除。")
         except queue.Empty:
             pass
-        self.after(250, self._poll_events)
+        finally:
+            self.after(250, self._poll_events)
 
     def _config_data(self) -> dict[str, object]:
         return {
